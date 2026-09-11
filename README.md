@@ -22,6 +22,8 @@ This fork adds `webroot/index.html` and a root-side helper. After installing **t
 4. In ReSukiSU, open **Modules → Xtreme Battery Saver → WebUI**.
 5. Before enabling any aggressive setting, open **Dashboard → Run diagnostics** and confirm the daemon and screen-state source are visible.
 
+The module checks GitHub Releases for update metadata, so future stable release assets can update it without relying on a manager-mounted `/system` path.
+
 The runtime files are deliberately kept outside the module folder so an update does not erase them:
 
 ```text

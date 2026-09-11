@@ -28,6 +28,17 @@ for item in "${files[@]}"; do
   [[ -e "$ROOT/$item" ]] || { echo "Missing package input: $item" >&2; exit 1; }
 done
 
+# Keep release metadata internally consistent. The update document is uploaded
+# as a release asset and `releases/latest` lets installed copies discover the
+# next release without depending on an unmerged source branch.
+version=$(sed -n 's/^version=//p' "$ROOT/module.prop" | head -n 1)
+version_code=$(sed -n 's/^versionCode=//p' "$ROOT/module.prop" | head -n 1)
+[ -n "$version" ] && [ -n "$version_code" ] || { echo "Invalid module.prop version metadata" >&2; exit 1; }
+grep -Fqx "updateJson=https://github.com/Rocker14427c/Xtreme-Battery-Saver/releases/latest/download/update.json" "$ROOT/module.prop"
+grep -Fq "\"version\": \"$version\"" "$ROOT/update.json"
+grep -Fq "\"versionCode\": \"$version_code\"" "$ROOT/update.json"
+grep -Fq "/releases/download/$version/XtremeBS.zip" "$ROOT/update.json"
+
 # zip refuses to create an archive over an already-created empty mktemp file.
 tmp="$(mktemp "$ROOT/.XtremeBS-build.XXXXXX.zip")"
 rm -f "$tmp"
