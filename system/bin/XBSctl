@@ -1,65 +1,127 @@
-#!/system/bin/bash
+#!/system/bin/sh
+# XtremeBS controller.  Kept POSIX-sh compatible so it can be called directly
+# from /data/adb/modules/XtremeBS on KernelSU/ReSukiSU without a system mount.
 
-conf="/data/local/tmp/XtremeBS/XtremeBS.conf"
+STATE_DIR=${XBS_STATE_DIR:-/data/local/tmp/XtremeBS}
+CONF=${XBS_CONF:-$STATE_DIR/XtremeBS.conf}
 
 getconf() {
-  # change made here to set default
-  # if not set
-  opt=$(grep "^$1=" "$conf" | cut -d= -f2)
-  [ "$opt" != "" ] && echo "$opt" || echo "$2"
+  value=$(awk -v key="$1" '
+    /^[[:space:]]*#/ { next }
+    index($0, key "=") == 1 {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$CONF" 2>/dev/null)
+  if [ -n "$value" ]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$2"
+  fi
 }
 
-ctl_file=$(getconf ctl_file "/data/local/tmp/xbs")
-version=$(getconf version 1)
+print_help() {
+  cat <<'EOF'
+XtremeBS Controller
 
-
-print_help_v2() {
-cat << EOM
-  XtremeBS Controller Options:
-
-  start		starts the manual event or a custom event
-
-  stop		stops the manual event or a custom event
-
-  pause		pauses the XtremeBS daemon
-
-  resume	resumes the XtremeBS daemon or exits safe mode
-
-  safe		stops all events and enters safe mode
-EOM
+Usage:
+  XBSctl start [event]  Start the manual event or a named v2 event
+  XBSctl stop [event]   Stop the manual event or a named v2 event
+  XBSctl reload         Reload the configuration
+  XBSctl pause          Pause trigger handling
+  XBSctl resume         Resume trigger handling / leave Safe Mode
+  XBSctl safe           Stop active events and enter Safe Mode
+  XBSctl status         Print the latest daemon status
+EOF
 }
 
-print_help_v1() {
-cat << EOM
-  XtremeBS Controller Options:
-
-  start		enables power save mode manually.
-
-  stop		disables power save mode manually.
-
-  reload	reloads the config file.
-
-  pause		pauses the daemon.
-
-  resume	resumes the daemon or exits Safe Mode.
-
-  safe		Enters Safe Mode.
-EOM
+valid_event() {
+  # Keep controller input aligned with the event-block grammar.  In
+  # particular, reject a leading digit/dash/dot rather than queueing a named
+  # event that cannot be represented consistently in a v2 config.
+  case "$1" in
+    ''|[!A-Za-z]*|*[!A-Za-z0-9_.-]*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
-case $1 in
-  ''|'-h'|'--help')
-    if [ "$version" = 2 ]; then
-      print_help_v2
+write_command() {
+  command=$1
+  ctl_file=$(getconf ctl_file "$STATE_DIR/xbs")
+  ctl_dir=$(dirname "$ctl_file")
+  lock_dir="${ctl_file}.lock"
+  tmp_file="${ctl_file}.tmp.$$"
+  attempts=0
+
+  if ! mkdir -p "$ctl_dir" 2>/dev/null; then
+    echo "ERROR: cannot create controller directory: $ctl_dir" >&2
+    return 1
+  fi
+
+  # Both this utility and XtremeBSd take this lightweight mkdir lock.  The
+  # original read-then-truncate protocol could lose a command written between
+  # those two operations.
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 50 ]; then
+      echo "ERROR: controller is busy (stale lock: $lock_dir?)" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+
+  umask 077
+  if ! printf '%s\n' "$command" > "$tmp_file" || ! mv -f "$tmp_file" "$ctl_file"; then
+    rm -f "$tmp_file"
+    rmdir "$lock_dir" 2>/dev/null
+    echo "ERROR: failed to queue command" >&2
+    return 1
+  fi
+  rmdir "$lock_dir" 2>/dev/null
+  printf 'Queued: %s\n' "$command"
+}
+
+case ${1:-} in
+  ''|-h|--help|help)
+    print_help
+    exit 0
+    ;;
+  status)
+    status_file="$STATE_DIR/XtremeBS.status"
+    if [ -f "$status_file" ]; then
+      cat "$status_file"
     else
-      print_help_v1
+      echo "Status is not available yet. Check $STATE_DIR/XtremeBS.service.log."
+      exit 1
+    fi
+    exit 0
+    ;;
+  reload|pause|resume|safe)
+    [ "$#" -eq 1 ] || { echo "ERROR: $1 does not accept an event name" >&2; exit 2; }
+    write_command "$1"
+    ;;
+  start|stop)
+    action=$1
+    version=$(getconf version 1)
+    event=${2:-}
+    [ "$#" -le 2 ] || { echo "ERROR: only one event name is allowed" >&2; exit 2; }
+    if [ -z "$event" ] && [ "$version" = 2 ]; then
+      event=manual
+    fi
+    if [ -n "$event" ] && ! valid_event "$event"; then
+      echo "ERROR: invalid event name: $event" >&2
+      exit 2
+    fi
+    if [ -n "$event" ]; then
+      write_command "$action $event"
+    else
+      write_command "$action"
     fi
     ;;
   *)
-    if [[ "$1" = "start" || "$1" = "stop" ]] && [ "$version" = "2" ] && [ ! "$2" ]; then
-      echo "start manual" > "$ctl_file"
-    else
-      echo "$@" > "$ctl_file"
-    fi
+    echo "ERROR: unknown command: $1" >&2
+    print_help >&2
+    exit 2
     ;;
 esac

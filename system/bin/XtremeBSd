@@ -1,34 +1,74 @@
 #!/system/bin/bash
-conf="/data/local/tmp/XtremeBS/XtremeBS.conf"
+# shellcheck shell=bash
+#
+# This daemon deliberately runs from the module directory rather than relying
+# on /system/bin being mounted.  KernelSU/ReSukiSU only mount a module's
+# system/ directory when a metamodule is installed, so /system/bin/XtremeBSd
+# and /system/bin/bash are not dependable locations there.
+MODDIR="${XBS_MODDIR:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}"
+STATE_DIR="${XBS_STATE_DIR:-/data/local/tmp/XtremeBS}"
+conf="${XBS_CONF:-$STATE_DIR/XtremeBS.conf}"
+BASH_BIN="${XBS_BASH:-$MODDIR/system/bin/bash}"
+
 declare -a active_events
 declare -a cpus
 declare -a cpu_freqs
 declare -a hp_cpus
 declare -a lp_cpus
 declare -a lp_govs
-declare RFKILL_CMD="" # Global variable for the correct rfkill command
-cpu_base_path="/sys/devices/system/cpu"
+declare -A lp_default_govs
+declare -A xbs_offlined_cores # CPUs this daemon actually changed from online to offline.
+declare -a RFKILL_CMD=() # Command and arguments used to control rfkill.
+cpu_base_path="${XBS_CPU_BASE_PATH:-/sys/devices/system/cpu}"
 
 # Helpers and one time things
 
 getconf() {
-  # change made here to set default
-  # if not set
-  opt=$(grep "^$1=" "$conf" | cut -d= -f2)
-  [ "$opt" != "" ] && echo "$opt" || echo "$2"
+  # Return the first, uncommented, exact key=value entry.  Values may contain
+  # additional '=' characters (for example a path or custom command).
+  local opt
+  opt=$(awk -v key="$1" '
+    /^[[:space:]]*#/ { next }
+    index($0, key "=") == 1 {
+      sub(/^[^=]*=/, "")
+      print
+      exit
+    }
+  ' "$conf" 2>/dev/null)
+  [ -n "$opt" ] && printf '%s\n' "$opt" || printf '%s\n' "$2"
 }
 
 is_device() {
-  # is device charging|screen|low_power
-  if [ "$1" != "low_power" ]; then
-    dumpsys deviceidle get $1
-  else
-    if [ $(settings get global low_power) = 1 ]; then
+  # Normalize the state to exactly true/false.  Older Android builds can deny
+  # one dumpsys service; screen state then falls back to dumpsys power.
+  local what out
+  what="$1"
+  if [ "$what" = "low_power" ]; then
+    if [ "$(settings get global low_power 2>/dev/null)" = "1" ]; then
       echo true
     else
       echo false
     fi
+    return
   fi
+
+  out=$(dumpsys deviceidle get "$what" 2>/dev/null | head -n 1 | tr -d '\r')
+  case "$out" in
+    *true*|*TRUE*) echo true; return ;;
+    *false*|*FALSE*) echo false; return ;;
+  esac
+
+  if [ "$what" = "screen" ]; then
+    out=$(dumpsys power 2>/dev/null | grep -m 1 -E 'mWakefulness=|Display Power: state=')
+    case "$out" in
+      *Awake*|*Dreaming*|*state=ON*) echo true; return ;;
+      *Asleep*|*state=OFF*)          echo false; return ;;
+    esac
+  fi
+
+  # Preserve the previous daemon behavior for unknown values, but do not
+  # manufacture a false transition from an empty/failed command.
+  printf '%s\n' "$out"
 }
 
 notif() {
@@ -53,191 +93,391 @@ log_msg() {
 }
 
 migrate() {
-  log_msg 2 "It looks like version=2 was found in the config without a valid event block"
-  log_msg 1 "Migrating to v2 config"
-  # start with base conf values
-  # delay, version, log_file, log_level
-  echo "version=2" > "$conf-v2"
-  ctl_file=$(getconf ctl_file "")
-  if [ ! -z "$ctl_file" ]; then
-    echo "ctl_file=$ctl_file" "$conf-v2"
-  fi
-  delay="$(getconf delay 3)"
-  echo "delay=$delay" >> "$conf-v2"
-  log_file="$(getconf log_file "$(dirname "$conf")/XtremeBS.log")"
-  echo "log_file=$log_file" >> "$conf-v2"
-  log_level="$(getconf log_level 1)"
-  echo "log_level=$log_level" >> "$conf-v2"
-  # newline for clarity
-  echo >> "$conf-v2"
+  local conf_v2="${conf}.v2"
+  local conf_v1="${conf}.v1"
+  local ctl_value delay_value log_value log_level_value trigger block
 
-  # start with figuring out the trigger,
-  # then write values over.
-  event_blocks=("charging" "screen_off")
-  # events:
-  # charging, screen_off, boot,
-  # manual, low_power
-  trigger="$(getconf trigger auto)"
+  log_msg 2 "version=2 was found without an event block; migrating legacy config"
+  log_msg 1 "Migrating to v2 config"
+  rm -f "$conf_v2"
+
+  # Top-level options.
+  printf 'version=2\n' > "$conf_v2"
+  ctl_value=$(getconf ctl_file "")
+  [ -n "$ctl_value" ] && printf 'ctl_file=%s\n' "$ctl_value" >> "$conf_v2"
+  delay_value=$(getconf delay 3)
+  printf 'delay=%s\n' "$delay_value" >> "$conf_v2"
+  log_value=$(getconf log_file "$STATE_DIR/XtremeBS.log")
+  printf 'log_file=%s\n' "$log_value" >> "$conf_v2"
+  log_level_value=$(getconf log_level 1)
+  printf 'log_level=%s\n' "$log_level_value" >> "$conf_v2"
+  printf '\n' >> "$conf_v2"
+
+  # Put legacy actions in the event that represented their old trigger.
+  # Empty companion events keep the generated config explicit and editable.
+  trigger=$(getconf trigger auto)
   case "$trigger" in
     auto)
-      event_blocks+=("manual" "boot")
-      # start event block
-      echo "low_power={" >> "$conf-v2"
-      # keep_on_charge can be used if
-      # you want the settings to persist
-      # when the device is plugged in
-      echo "keep_on_charge=$(getconf keep_on_charge true)" >> "$conf-v2"
+      block=low_power
+      printf 'low_power={\nkeep_on_charge=%s\n' "$(getconf keep_on_charge true)" >> "$conf_v2"
       ;;
     boot)
-      event_blocks+=("low_power" "manual")
-      echo "boot={" >> "$conf-v2"
-      # quit is a new option that can only
-      # be used in a boot block. it exits the daemon
-      # after making changes to keep CPU cycles to a minimum
-      echo "quit=false" >> "$conf-v2"
+      block=boot
+      printf 'boot={\nquit=false\n' >> "$conf_v2"
       ;;
     manual)
-      event_blocks+=("boot" "low_power")
-      echo "on_start={" >> "$conf-v2"
+      block=manual
+      printf 'manual={\n' >> "$conf_v2"
+      ;;
+    *)
+      log_msg 1 "Unknown legacy trigger '$trigger'; using low_power"
+      trigger=low_power
+      block=low_power
+      printf 'low_power={\nkeep_on_charge=%s\n' "$(getconf keep_on_charge true)" >> "$conf_v2"
       ;;
   esac
 
-  # copy values over
-  echo "handle_cores=$(getconf handle_cores false)" >> "$conf-v2"
-  echo "disable_cores=$(getconf disable_cores false)" >> "$conf-v2"
-  echo "handle_apps=$(getconf handle_apps false)" >> "$conf-v2"
-  echo "allowlist=$(getconf allowlist /sdcard/XtremeBS/apps.allow)" >> "$conf-v2"
-  echo "denylist=$(getconf denylist /sdcard/XtremeBS/apps.deny)" >> "$conf-v2"
-  echo "handle_gms=$(getconf handle_gms false)" >> "$conf-v2"
-  echo "handle_proc=$(getconf handle_proc false)" >> "$conf-v2"
-  echo "proc_file=$(getconf proc_file /sdcard/XtremeBS/proc.list)" >> "$conf-v2"
-  echo "low_ram=$(getconf low_ram false)" >> "$conf-v2"
-  echo "doze=$(getconf doze false)" >> "$conf-v2"
-  echo "kill_wifi=$(getconf kill_wifi false)" >> "$conf-v2"
-  echo "}" >> "$conf-v2"
-  echo >> "$conf-v2"
+  printf 'handle_cores=%s\n' "$(getconf handle_cores false)" >> "$conf_v2"
+  printf 'disable_cores=%s\n' "$(getconf disable_cores false)" >> "$conf_v2"
+  printf 'handle_apps=%s\n' "$(getconf handle_apps false)" >> "$conf_v2"
+  printf 'allowlist=%s\n' "$(getconf allowlist "$STATE_DIR/apps.allow")" >> "$conf_v2"
+  printf 'denylist=%s\n' "$(getconf denylist "$STATE_DIR/apps.deny")" >> "$conf_v2"
+  printf 'handle_gms=%s\n' "$(getconf handle_gms false)" >> "$conf_v2"
+  printf 'handle_proc=%s\n' "$(getconf handle_proc false)" >> "$conf_v2"
+  printf 'proc_file=%s\n' "$(getconf proc_file "$STATE_DIR/proc.list")" >> "$conf_v2"
+  printf 'low_ram=%s\n' "$(getconf low_ram false)" >> "$conf_v2"
+  printf 'doze=%s\n' "$(getconf doze false)" >> "$conf_v2"
+  printf 'kill_wifi=%s\n' "$(getconf kill_wifi false)" >> "$conf_v2"
+  printf '}\n\n' >> "$conf_v2"
 
-  # write remaining event blocks
-  for event in ${event_blocks[@]}; do
-    echo -e "$event={\n}\n" >> "$conf-v2"
+  for block in charging screen_off boot manual low_power; do
+    # Do not duplicate the block which already received the legacy settings.
+    case "$block" in
+      "$trigger") continue ;;
+      low_power) [ "$trigger" = auto ] && continue ;;
+    esac
+    printf '%s={\n}\n' "$block" >> "$conf_v2"
   done
 
-  # remove the version string and make backup
-  sed -i '/^version=2/d' "$conf" # remove v2
-  mv "$conf" "$conf-v1"
-  # make new conf take effect
-  mv "$conf-v2" "$conf"
-  log_msg 1 "Migration complete!"
+  # Keep the original configuration as a recoverable backup.  Writing the new
+  # configuration to a sibling file then renaming it prevents a torn config.
+  mv -f "$conf" "$conf_v1"
+  mv -f "$conf_v2" "$conf"
+  log_msg 1 "Migration complete; legacy backup: $conf_v1"
 }
 
 auto_map_cores() {
+  local dir cpu freq max_freq=0 max_count=0 gov i is_high
+
+  cpus=()
+  cpu_freqs=()
+  hp_cpus=()
+  lp_cpus=()
+  lp_govs=()
+  lp_default_govs=()
+
   log_msg 2 "Auto-mapping CPU cores"
-  # high power cores
-  for cpu in $(ls "$cpu_base_path/" | grep cpu[00-99]); do
-    cpus+=( "$cpu" )
-    cpu_freqs+=( "$(cat $cpu_base_path/$cpu/cpufreq/cpuinfo_max_freq)" )
-  done
-  for high_freq in $(echo "${cpu_freqs[@]}" | tr ' ' '\n' | uniq -u); do
-    for index in "${!cpu_freqs[@]}"; do
-      if [ "${cpu_freqs[$index]}" = "$high_freq" ]; then
-        hp_cpus+=( "${cpus[$index]}" )
-      fi
-    done
-  done
-  for i in ${!hp_cpus[@]}; do
-    tmp_var+="${hp_cpus[$i]} "
-  done
-  log_msg 3 "High power cores: $tmp_var"
-  unset tmp_var
-  # Low Power Cores
-  for core in $(ls "$cpu_base_path/" | grep cpu[00-99]); do
-    match="false"
-    for hp_core in ${hp_cpus[@]}; do
-      [ "$core" = "$hp_core" ] && match="true"
-    done
-    if [ "$match" = "false" ] && grep -q " powersave " "$cpu_base_path/$core/cpufreq/scaling_available_governors"; then
-      lp_govs+=( "$(cat $cpu_base_path/$core/cpufreq/scaling_governor)" )
-      lp_default_govs[$core]="$(cat $cpu_base_path/$cpu/cpufreq/scaling_governor )"
-      lp_cpus+=( "$core" )
+  for dir in "$cpu_base_path"/cpu[0-9]*; do
+    [ -d "$dir" ] || continue
+    cpu=${dir##*/}
+    freq=""
+    [ -r "$dir/cpufreq/cpuinfo_max_freq" ] && freq=$(cat "$dir/cpufreq/cpuinfo_max_freq" 2>/dev/null)
+    cpus+=("$cpu")
+    cpu_freqs+=("$freq")
+    if [[ "$freq" =~ ^[0-9]+$ ]] && (( freq > max_freq )); then
+      max_freq=$freq
     fi
   done
-    for i in ${!lp_cpus[@]}; do
-    tmp_var+="${lp_cpus[$i]} "
+
+  if ((${#cpus[@]} == 0)); then
+    log_msg 1 "No CPU directories found under $cpu_base_path"
+    return
+  fi
+
+  # `disable_cores=auto` must never choose every CPU on a single-cluster SoC.
+  # On multi-cluster devices, choose the highest-frequency cluster instead of
+  # the old `uniq -u` heuristic (which missed equally clocked big cores).
+  for freq in "${cpu_freqs[@]}"; do
+    [ "$freq" = "$max_freq" ] && ((max_count++))
   done
-  log_msg 3 "Low power cores: $tmp_var"
-  unset tmp_var
+  if (( max_freq > 0 && max_count < ${#cpus[@]} )); then
+    for i in "${!cpus[@]}"; do
+      [ "${cpu_freqs[$i]}" = "$max_freq" ] && hp_cpus+=("${cpus[$i]}")
+    done
+  elif (( max_count == ${#cpus[@]} )); then
+    log_msg 1 "All CPUs report the same maximum frequency; disable_cores=auto will not offline every core"
+  fi
+
+  for cpu in "${cpus[@]}"; do
+    is_high=false
+    for dir in "${hp_cpus[@]}"; do
+      [ "$cpu" = "$dir" ] && { is_high=true; break; }
+    done
+    [ "$is_high" = true ] && continue
+
+    gov="$(cat "$cpu_base_path/$cpu/cpufreq/scaling_governor" 2>/dev/null)"
+    if [ -n "$gov" ] && grep -qw powersave "$cpu_base_path/$cpu/cpufreq/scaling_available_governors" 2>/dev/null; then
+      lp_cpus+=("$cpu")
+      lp_govs+=("$gov")
+    fi
+  done
+
+  log_msg 3 "High-power cores: ${hp_cpus[*]:-none}"
+  log_msg 3 "Low-power cores supporting powersave: ${lp_cpus[*]:-none}"
 }
 
 find_rfkill_command() {
+  local candidate
+  RFKILL_CMD=()
   log_msg 2 "Searching for a valid rfkill command..."
+
   if command -v rfkill >/dev/null 2>&1; then
-    RFKILL_CMD="rfkill"
-  elif command -v toybox >/dev/null 2>&1 && toybox --help | grep -q rfkill; then
-    RFKILL_CMD="toybox rfkill"
+    RFKILL_CMD=(rfkill)
+  elif command -v toybox >/dev/null 2>&1 && toybox rfkill --help >/dev/null 2>&1; then
+    RFKILL_CMD=(toybox rfkill)
   else
-    local busybox_path="$(find /data/adb/ -type f -name busybox)"
-    if [ -f "$busybox_path" ] && "$busybox_path" --help | grep -q rfkill; then
-      RFKILL_CMD="$busybox_path rfkill"
-    fi
+    for candidate in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox; do
+      if [ -x "$candidate" ] && "$candidate" rfkill --help >/dev/null 2>&1; then
+        RFKILL_CMD=("$candidate" rfkill)
+        break
+      fi
+    done
   fi
 
-  if [ -n "$RFKILL_CMD" ]; then
-    log_msg 2 "Found rfkill command: $RFKILL_CMD"
+  if ((${#RFKILL_CMD[@]})); then
+    log_msg 2 "Found rfkill command: ${RFKILL_CMD[*]}"
   else
     log_msg 2 "No rfkill command found. Will rely on svc for WiFi control."
   fi
 }
 
+rfkill_soft_blocked() {
+  ((${#RFKILL_CMD[@]})) || return 1
+  "${RFKILL_CMD[@]}" list wifi 2>/dev/null | awk '/Soft blocked:/ { print $3; exit }'
+}
+
 update_status() {
-  status_file="/data/local/tmp/XtremeBS/XtremeBS.status"
-  echo -n > "$status_file"
-  # CPU Map
-  for i in ${!cpus[@]}; do
-    core="${cpus[$i]}"
-    core_list+=( "$core" )
-    #is it in powersave
-    core="${core_list[$i]}"
-    if [ "$(cat $cpu_base_path/$core/cpufreq/scaling_governor)" = "powersave" ]; then
-      tmp_var="powersave"
+  local status_file core governor online wifi light deep doze
+  status_file="$STATE_DIR/XtremeBS.status"
+  mkdir -p "$STATE_DIR" 2>/dev/null || return
+  : > "$status_file"
+
+  # CPU map.  cpu0 normally has no online node because the boot CPU cannot be
+  # hotplugged, so treat a missing node as online rather than printing errors.
+  for core in "${cpus[@]}"; do
+    online=online
+    if [ -r "$cpu_base_path/$core/online" ] && [ "$(cat "$cpu_base_path/$core/online" 2>/dev/null)" = "0" ]; then
+      online=offline
+    else
+      governor=$(cat "$cpu_base_path/$core/cpufreq/scaling_governor" 2>/dev/null)
+      [ "$governor" = powersave ] && online=powersave
     fi
-    # is it disabled
-    if [ "$(cat $cpu_base_path/$core/online)" = "0" ]; then
-      tmp_var="offline"
-    fi
-    core_status+=( "${tmp_var:-online}" )
-    unset tmp_var
+    printf '%s: %s\n' "$core" "$online" >> "$status_file"
   done
 
-  # wifi
-  if [ -n "$RFKILL_CMD" ]; then
-    wifi=$($RFKILL_CMD list wifi | grep "Soft" | cut -d' ' -f3)
-  fi
-  if [ "$wifi" = "yes" ]; then
-    wifi="disabled"
-  else
-    wifi="enabled"
+  wifi=unknown
+  if ((${#RFKILL_CMD[@]})); then
+    case "$(rfkill_soft_blocked)" in
+      yes) wifi=disabled ;;
+      no)  wifi=enabled ;;
+    esac
   fi
 
-  # Doze
-  unset doze
-  light="$(dumpsys deviceidle get light)"
-  deep="$(dumpsys deviceidle get deep)"
-  if [ "$light" = "IDLE" ]; then
-    doze="light"
-  elif [ "$deep" = "IDLE" ]; then
-    doze="deep"
+  light="$(dumpsys deviceidle get light 2>/dev/null)"
+  deep="$(dumpsys deviceidle get deep 2>/dev/null)"
+  if [ "$light" = IDLE ]; then
+    doze=light
+  elif [ "$deep" = IDLE ]; then
+    doze=deep
   else
-    doze="inactive"
+    doze=inactive
   fi
 
-  for i in ${!core_list[@]}; do
-    echo "${core_list[$i]}: ${core_status[$i]}" >> "$status_file"
+  printf 'Low RAM: %s\n' "$(getprop ro.config.low_ram 2>/dev/null)" >> "$status_file"
+  printf 'WiFi: %s\n' "$wifi" >> "$status_file"
+  printf 'Doze: %s\n' "$doze" >> "$status_file"
+}
+
+# Return valid CPU names requested by a disable_cores setting.  The helper
+# deliberately excludes cpu0: it is normally the boot CPU and offlining it
+# can freeze or reboot a device.
+disable_core_targets() {
+  local requested="$1" cpu
+  case "$requested" in
+    ''|false) return 0 ;;
+    auto)
+      for cpu in "${hp_cpus[@]}"; do
+        [ -f "$cpu_base_path/$cpu/online" ] && printf '%s\n' "$cpu"
+      done
+      return 0
+      ;;
+  esac
+
+  for cpu in $requested; do
+    if [[ ! "$cpu" =~ ^cpu[0-9]+$ ]]; then
+      log_msg 1 "Ignoring invalid disable_cores entry: $cpu"
+    elif [ "$cpu" = cpu0 ]; then
+      log_msg 1 "Refusing to offline cpu0 (boot CPU safety guard)"
+    elif [ ! -f "$cpu_base_path/$cpu/online" ]; then
+      log_msg 1 "Skipping $cpu: no writable online node"
+    else
+      printf '%s\n' "$cpu"
+    fi
   done
-  unset core_list core_status
-  echo "Low RAM: $(getprop ro.config.low_ram)" >> "$status_file"
-  echo "WiFi: $wifi" >> "$status_file"
-  echo "Doze: $doze" >> "$status_file"
-  unset doze wifi
+}
+
+write_cpu_online() {
+  local cpu="$1" wanted="$2" node attempt err current
+  CPU_ONLINE_CHANGED=false
+  node="$cpu_base_path/$cpu/online"
+  [ -f "$node" ] || { log_msg 1 "Skipping $cpu: online node is missing"; return 1; }
+
+  current=$(cat "$node" 2>/dev/null)
+  [ "$current" = "$wanted" ] && return 0
+  for attempt in 1 2 3; do
+    err=$(printf '%s\n' "$wanted" > "$node" 2>&1)
+    sleep 0.1
+    current=$(cat "$node" 2>/dev/null)
+    if [ "$current" = "$wanted" ]; then
+      CPU_ONLINE_CHANGED=true
+      log_msg 3 "$cpu -> $([ "$wanted" = 0 ] && printf OFFLINE || printf ONLINE)${attempt:+ (attempt $attempt)}"
+      return 0
+    fi
+    [ "$attempt" -lt 3 ] && sleep 0.3
+  done
+
+  log_msg 1 "$cpu: failed to set online=$wanted after 3 attempts${err:+ - $err}"
+  return 1
+}
+
+apply_disabled_cores() {
+  local cpu
+  while IFS= read -r cpu; do
+    [ -n "$cpu" ] || continue
+    if write_cpu_online "$cpu" 0 && [ "$CPU_ONLINE_CHANGED" = true ]; then
+      # Do not claim a core that was already offline before XtremeBS ran.
+      # That lets cleanup preserve a kernel/user-selected offline state.
+      xbs_offlined_cores["$cpu"]=1
+    fi
+  done < <(disable_core_targets "$1")
+}
+
+restore_disabled_cores() {
+  local cpu
+  while IFS= read -r cpu; do
+    [ -n "$cpu" ] || continue
+    if [ -z "${xbs_offlined_cores[$cpu]:-}" ]; then
+      log_msg 3 "Leaving $cpu offline: it was not offlined by this daemon"
+      continue
+    fi
+    if write_cpu_online "$cpu" 1; then
+      unset "xbs_offlined_cores[$cpu]"
+    fi
+  done < <(disable_core_targets "$1")
+}
+
+set_powersave_governor() {
+  local cpu="$1" node available current
+  node="$cpu_base_path/$cpu/cpufreq/scaling_governor"
+  available="$cpu_base_path/$cpu/cpufreq/scaling_available_governors"
+  [ -r "$node" ] || { log_msg 2 "Skipping $cpu: governor node unavailable"; return 1; }
+  grep -qw powersave "$available" 2>/dev/null || { log_msg 2 "Skipping $cpu: powersave governor unavailable"; return 1; }
+
+  current=$(cat "$node" 2>/dev/null)
+  [ -n "${lp_default_govs[$cpu]:-}" ] || lp_default_govs["$cpu"]="$current"
+  [ "$current" = powersave ] && return 0
+  if printf 'powersave\n' > "$node" 2>/dev/null; then
+    log_msg 3 "Setting powersave on $cpu"
+  else
+    log_msg 1 "Failed to set powersave on $cpu"
+    return 1
+  fi
+}
+
+restore_governor() {
+  local cpu="$1" node original
+  node="$cpu_base_path/$cpu/cpufreq/scaling_governor"
+  original="${lp_default_govs[$cpu]:-}"
+  [ -n "$original" ] || return 0
+  [ -w "$node" ] || { log_msg 1 "Cannot restore governor for $cpu"; return 1; }
+  if [ "$(cat "$node" 2>/dev/null)" != "$original" ]; then
+    if printf '%s\n' "$original" > "$node" 2>/dev/null; then
+      log_msg 3 "Resetting $cpu governor to $original"
+    else
+      log_msg 1 "Failed to restore $cpu governor to $original"
+      return 1
+    fi
+  fi
+  # Capture the governor at the next activation, not at daemon boot.  A user
+  # or thermal service may legitimately change it while no event is active.
+  unset "lp_default_govs[$cpu]"
+}
+
+handle_core_targets() {
+  local requested="$1" cpu
+  case "$requested" in
+    ''|false) return 0 ;;
+    auto)
+      printf '%s\n' "${lp_cpus[@]}"
+      return 0
+      ;;
+  esac
+  for cpu in $requested; do
+    if [[ "$cpu" =~ ^cpu[0-9]+$ ]]; then
+      printf '%s\n' "$cpu"
+    else
+      log_msg 1 "Ignoring invalid handle_cores entry: $cpu"
+    fi
+  done
+}
+
+apply_handled_cores() {
+  local cpu
+  while IFS= read -r cpu; do
+    [ -n "$cpu" ] && set_powersave_governor "$cpu"
+  done < <(handle_core_targets "$1")
+}
+
+restore_handled_cores() {
+  local cpu
+  while IFS= read -r cpu; do
+    [ -n "$cpu" ] && restore_governor "$cpu"
+  done < <(handle_core_targets "$1")
+}
+
+# Controller reads and writes share a small mkdir lock with XBSctl.  This
+# avoids losing a command in the old `cat file; : > file` race window.
+acquire_ctl_lock() {
+  local lock_dir="${ctl_file}.lock" attempts=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    ((attempts++))
+    [ "$attempts" -ge 50 ] && return 1
+    sleep 0.1
+  done
+  return 0
+}
+
+release_ctl_lock() {
+  rmdir "${ctl_file}.lock" 2>/dev/null || true
+}
+
+read_ctl_command() {
+  local ctl_dir
+  CTL_COMMAND=""
+  [ -n "${ctl_file:-}" ] || return 1
+  ctl_dir=$(dirname "$ctl_file")
+  mkdir -p "$ctl_dir" 2>/dev/null || return 1
+  acquire_ctl_lock || { log_msg 1 "Controller lock timed out; command will be retried"; return 1; }
+  [ -s "$ctl_file" ] && CTL_COMMAND=$(cat "$ctl_file" 2>/dev/null)
+  : > "$ctl_file"
+  release_ctl_lock
+  return 0
+}
+
+restart_daemon() {
+  # Re-exec through the bundled Bash.  Executing $0 directly would consult its
+  # /system/bin/bash shebang, which is absent when KernelSU has no metamodule.
+  exec "$BASH_BIN" "$0"
 }
 
 # V1 read_config
@@ -245,6 +485,13 @@ read_config() {
   # Read config
   # delay in seconds
   delay=$(getconf delay 3)
+  case "$delay" in
+    ''|*[!0-9]*)
+      log_msg 1 "Invalid delay '$delay'; using 3 seconds"
+      delay=3
+      ;;
+  esac
+  [ "$delay" -lt 1 ] && delay=1
 
   # trigger
   # auto|boot # <integer>
@@ -380,18 +627,17 @@ enable_pwr_save() {
   # Handle WiFi
   if [ "$kill_wifi" = "true" ]; then
     log_msg 3 "Disabling WiFi"
-    if [ -n "$RFKILL_CMD" ]; then
-      log_msg 3 "Attempting to block with: $RFKILL_CMD"
-      "$RFKILL_CMD" block wifi
-      
-      # Check if rfkill actually worked, if not, use svc as a final fallback
-      if [ "$("$RFKILL_CMD" list wifi | grep Soft | cut -d: -f2 | cut -d' ' -f2)" != "yes" ]; then
-         log_msg 3 "rfkill failed to block. Falling back to svc."
-         svc wifi disable
+    if ((${#RFKILL_CMD[@]})); then
+      log_msg 3 "Attempting to block with: ${RFKILL_CMD[*]}"
+      "${RFKILL_CMD[@]}" block wifi >/dev/null 2>&1
+      # Check whether rfkill actually worked; use svc as a final fallback.
+      if [ "$(rfkill_soft_blocked)" != yes ]; then
+        log_msg 3 "rfkill failed to block. Falling back to svc."
+        svc wifi disable >/dev/null 2>&1
       fi
     else
       log_msg 3 "No rfkill command available. Using svc."
-      svc wifi disable
+      svc wifi disable >/dev/null 2>&1
     fi
   fi
 
@@ -405,45 +651,12 @@ enable_pwr_save() {
     dumpsys deviceidle force-idle deep &>/dev/null
   fi
 
-  # Handle Cores
-
+  # CPU hotplug and cpufreq sysfs are outside Magisk's system overlay.  Do
+  # not call magic_remount_* here: those functions are unavailable in many
+  # KernelSU shells and are unnecessary for writable sysfs nodes.
   if [ "$handle_cores" != "false" ] || [ "$disable_cores" != "false" ]; then
-    if [ -d "/data/adb/modules" ]; then
-      # magisk mount read-write
-      magic_remount_rw &>/dev/null
-    fi
-    if [ "$disable_cores" = "auto" ]; then
-      for cpu in ${hp_cpus[@]}; do
-        log_msg 3 "Disabling $cpu"
-        echo "0" > "$cpu_base_path/$cpu/online"
-      done
-    else
-      # manual
-      for core in $disable_cores; do
-        if [ -d "$cpu_base_path/$core" ]; then
-          log_msg 3 "Disabling $core"
-          echo "0" > "$cpu_base_path/$core/online"
-        fi
-      done
-    fi
-    if [ "$handle_cores" = "auto" ]; then
-      for cpu in ${lp_cpus[@]}; do
-        log_msg 3 "Setting powersave on $cpu"
-        echo "powersave" > "$cpu_base_path/$cpu/cpufreq/scaling_governor"
-      done
-    else
-      # manual
-      for core in $handle_cores; do
-        [ -d "$cpu_base_path/$core/" ] && \
-        grep -q " powersave " "$cpu_base_path/$core/cpufreq/scaling_available_governors" && \
-        log_msg 3 "Setting powersave on $core" && \
-        echo "powersave" > "$cpu_base_path/$cpu/cpufreq/scaling_governor"
-      done
-    fi
-    if [ -d "/data/adb/modules" ]; then
-      # magisk mount read-only
-      magic_remount_ro &>/dev/null
-    fi
+    apply_disabled_cores "$disable_cores"
+    apply_handled_cores "$handle_cores"
   fi
 
   if [ "$version" != "2" ]; then
@@ -461,49 +674,11 @@ disable_pwr_save() {
     notif "Disabling XtremeBS..."
     log_msg 1 "Disabling XtremeBS"
   fi
-  # Handle Cores
-
+  # Restore only the CPU settings this event requested.  Active events are
+  # reconciled immediately by handle_event after an event exits.
   if [ "$handle_cores" != "false" ] || [ "$disable_cores" != "false" ]; then
-    if [ -d "/data/adb/modules" ]; then
-      # magisk mount read-write
-      magic_remount_rw &>/dev/null
-    fi
-    if [ "$disable_cores" = "auto" ]; then
-      for cpu in ${hp_cpus[@]}; do
-        log_msg 3 "Enabling $cpu"
-        echo "1" > "$cpu_base_path/$cpu/online"
-      done
-    else
-      # the user manually set it
-      for cpu in $disable_cores; do
-        if [ -d "$cpu_base_path/$cpu/" ]; then
-          log_msg 3 "Enabling $cpu"
-          echo "1" > "$cpu_base_path/$cpu/online"
-        fi
-      done
-    fi
-    if [ "$handle_cores" = "auto" ]; then
-      for index in ${!lp_cpus[@]}; do
-        # TBH, i have no fucking clue
-        # what i did here but its
-        # magical and it works
-        # so, i will just leave it.
-        log_msg 3 "Resetting ${lp_cpus[$index]}"
-        echo "${lp_govs[$index]}" > "$cpu_base_path/${lp_cpus[$index]}/cpufreq/scaling_governor"
-      done
-    else
-      # the user manually set it
-      for cpu in $handle_cores; do
-        if [ -d "$cpu_base_path/$cpu/" ]; then
-          log_msg 3 "Resetting $cpu"
-          echo "${lp_default_govs[$cpu]}" > "$cpu_base_path/$cpu/cpufreq/scaling_governor"
-        fi
-      done
-    fi
-    if [ -d "/data/adb/modules" ]; then
-      # magisk mount read-only
-      magic_remount_ro &>/dev/null
-    fi
+    restore_disabled_cores "$disable_cores"
+    restore_handled_cores "$handle_cores"
   fi
 
   # Handle Doze
@@ -515,18 +690,17 @@ disable_pwr_save() {
   # Handle WiFi
   if [ "$kill_wifi" = "true" ]; then
     log_msg 3 "Enabling WiFi"
-    if [ -n "$RFKILL_CMD" ]; then
-      log_msg 3 "Attempting to unblock with: $RFKILL_CMD"
-      "$RFKILL_CMD" unblock wifi
-      
-      # Check if rfkill actually worked, if not, use svc as a final fallback
-      if [ "$("$RFKILL_CMD" list wifi | grep Soft | cut -d: -f2 | cut -d' ' -f2)" != "no" ]; then
-         log_msg 3 "rfkill failed to unblock. Falling back to svc."
-         svc wifi enable
+    if ((${#RFKILL_CMD[@]})); then
+      log_msg 3 "Attempting to unblock with: ${RFKILL_CMD[*]}"
+      "${RFKILL_CMD[@]}" unblock wifi >/dev/null 2>&1
+      # Check whether rfkill actually worked; use svc as a final fallback.
+      if [ "$(rfkill_soft_blocked)" != no ]; then
+        log_msg 3 "rfkill failed to unblock. Falling back to svc."
+        svc wifi enable >/dev/null 2>&1
       fi
     else
       log_msg 3 "No rfkill command available. Using svc."
-      svc wifi enable
+      svc wifi enable >/dev/null 2>&1
     fi
   fi
 
@@ -594,8 +768,9 @@ is_event_locked() {
 }
 
 handle_event() {
-  event="$1"
-  flag="$2"
+  # flag: 1 = activate, 0 = deactivate, 2 = internal re-apply of an
+  # already-active event after another event exited.
+  local event="$1" flag="$2" reapply_event
 
   if [ "$flag" = 1 ]; then # we are trying to enable
     # check to see if its unlocked
@@ -627,13 +802,24 @@ handle_event() {
 
   log_msg 3 "Parsing the config for $event event"
 
-  # parse config of event
+  # Parse exactly one event block.  The old grep -A99 form could consume a
+  # following block after 99 lines and treated an event name as a regex.
   line=''
-  while read line; do
-    [ "$line" = "$event={" ] && continue
-    [ "$line" = "}" ] && break
-    key=$(echo "$line" | cut -d= -f1)
-    val=$(echo "$line" | cut -d= -f2-)
+  while IFS= read -r line; do
+    # README examples indent keys inside a block.  Normalize surrounding
+    # whitespace before matching; previously "  disable_cores" silently
+    # missed every case arm and made a valid-looking profile a no-op.
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    compact_line=${line//[[:space:]]/}
+    [ "$compact_line" = "$event={" ] && continue
+    [ "$compact_line" = "}" ] && break
+    key=${line%%=*}
+    val=${line#*=}
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    val=${val#"${val%%[![:space:]]*}"}
+    val=${val%"${val##*[![:space:]]}"}
     case $key in
       keep_on_charge)
         if [ "$val" = "true" ] && \
@@ -693,7 +879,17 @@ handle_event() {
           kill_wifi="true"
         fi;;
     esac
-  done < <(grep -A99 "$event={" "$conf")
+  done < <(
+    awk -v target="$event" '
+      {
+        compact = $0
+        gsub(/[[:space:]]/, "", compact)
+        if (compact == target "={") inside = 1
+        if (inside) print
+        if (inside && compact == "}") exit
+      }
+    ' "$conf" 2>/dev/null
+  )
 
   # perform sanity checks to prevent the user from killing themself
   if [ "$handle_apps" != "false" ] && [ "$allowlist" = "null" ] && [ "$denylist" = "null" ]; then
@@ -716,24 +912,38 @@ handle_event() {
       fi
     done
     log_msg 1 "Actions for $event undone"
+
+    # The original daemon restored the exiting event and stopped there.  That
+    # briefly (and sometimes permanently) undid restrictions from another
+    # still-active event, e.g. screen_off re-enabled low_power's CPUs.  Reapply
+    # the remaining events synchronously so their restrictions win again.
+    if ((${#active_events[@]})); then
+      log_msg 2 "Reapplying remaining active events after $event exited"
+      for reapply_event in "${active_events[@]}"; do
+        [ -n "$reapply_event" ] && handle_event "$reapply_event" 2
+      done
+    fi
   else
     log_msg 1 "Performing actions for $event event"
     enable_pwr_save
     log_msg 1 "Actions for $event completed"
-    if [ "$event" = "boot" ] && \
+    if [ "$event" = "boot" ] && [ "$flag" = "1" ] && \
     [ "$quit" = "true" ]; then
       log_msg 1 "Boot event has the quit option set. Killing the daemon."
       exit 0
     fi
   fi
 
-  # build the active events notification
-  for i in ${!active_events[@]}; do
-    active_notif+="${active_events[$i]} "
-  done
-
-  notif "Active Events: $active_notif"
-  unset active_notif
+  # A re-apply is an internal reconciliation; do not create a notification
+  # storm while rebuilding the effective settings of active events.
+  if [ "$flag" != "2" ]; then
+    # build the active events notification
+    for i in "${!active_events[@]}"; do
+      active_notif+="${active_events[$i]} "
+    done
+    notif "Active Events: $active_notif"
+    unset active_notif
+  fi
 }
 
 init_v2() {
@@ -759,11 +969,14 @@ was_screen_on="$screen_on"
 
 while true; do
 
-  # Check for command
-  cmd="$(cat $ctl_file)"
-  cmd_event=$(echo "$cmd" | cut -d' ' -f2)
-  cmd=$(echo "$cmd" | cut -d' ' -f1)
-  echo > "$ctl_file"
+  # Check for one controller command without racing XBSctl.
+  read_ctl_command
+  cmd=${CTL_COMMAND%% *}
+  if [ "$cmd" = "$CTL_COMMAND" ]; then
+    cmd_event=""
+  else
+    cmd_event=${CTL_COMMAND#* }
+  fi
   case $cmd in
     reload)
       # reload is for top level config opts
@@ -771,7 +984,7 @@ while true; do
         handle_event "${active_events[$i]}" 0
       done
       log_msg 2 "Reloading the config"
-      exec "$0"
+      restart_daemon
       ;;
     start)
       if [ ! "$cmd_event" ]; then
@@ -796,10 +1009,13 @@ while true; do
       fi
       ;;
     pause)
+      resume=""
       until [ "$resume" = "resume" ]; do
         sleep "$delay"
-        resume="$(cat $ctl_file)"
-      done ;;
+        read_ctl_command
+        resume="$CTL_COMMAND"
+      done
+      ;;
     safe)
       log_msg 1 "Entered Safe Mode"
       echo "safemode=1" >> "$conf"
@@ -810,12 +1026,15 @@ while true; do
         pm unsuspend "$pkg"
       done
       notif "Safe Mode is Active"
+      ready=""
       until [ "$ready" = "resume" ]; do
-        ready="$(cat $ctl_file)"
+        sleep "$delay"
+        read_ctl_command
+        ready="$CTL_COMMAND"
       done
       log_msg 1 "Resume command received. Safe Mode Exited."
       sed -i '/safemode=1/d' "$conf"
-      exec "$0"
+      restart_daemon
       ;;
     *)
       :
@@ -873,9 +1092,9 @@ done
 init_v1() {
   read_config
   while true; do
-    # Check for command
-      cmd="$(cat $ctl_file)"
-      echo > "$ctl_file"
+    # Check for command without racing XBSctl.
+      read_ctl_command
+      cmd="$CTL_COMMAND"
       case $cmd in
         reload)
           log_msg 1 "Reload command received"
@@ -924,9 +1143,11 @@ init_v1() {
           ;;
         pause)
           log_msg 1 "Pause command received"
+          resume=""
           until [ "$resume" = "resume" ]; do
             sleep "$delay"
-            resume="$(cat $ctl_file)"
+            read_ctl_command
+            resume="$CTL_COMMAND"
           done
           log_msg 1 "Resume command received"
           ;;
@@ -945,12 +1166,15 @@ init_v1() {
             pm unsuspend "$pkg"
           done
           notif "Safe Mode is Active"
+          ready=""
           until [ "$ready" = "resume" ]; do
-            ready="$(cat $ctl_file)"
+            sleep "$delay"
+            read_ctl_command
+            ready="$CTL_COMMAND"
           done
           sed -i '/safemode=1/d' "$conf"
           log_msg 1 "Resume command received. Safe Mode Exited. Restarting Daemon."
-          exec "$0"
+          restart_daemon
           ;;
         *)
           :
@@ -967,7 +1191,7 @@ init_v1() {
         enable_pwr_save
       fi
       if [ "$(settings get global low_power)" = "0" ] && [ "$lock" = "1" ]; then
-        if [ "$keep_on_charge" = "false" ] || [ "$(getstate charging)" = "false" ]; then
+        if [ "$keep_on_charge" = "false" ] || [ "$(is_device charging)" = "false" ]; then
             disable_pwr_save
         fi
       fi
@@ -983,132 +1207,128 @@ init_v1() {
 
 # START
 
-# setup config (v1 is default... for now...)
-
-[ ! -d /data/local/tmp/XtremeBS/ ] && mkdir /data/local/tmp/XtremeBS/
+# Keep all runtime files under one writable directory.  This is intentionally
+# outside the module tree so an in-place module update does not erase a user's
+# configuration.
+if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+  echo "XtremeBS: cannot create state directory: $STATE_DIR" >&2
+  exit 1
+fi
+umask 077
 
 if [ ! -s "$conf" ]; then
-  cat << EOF > "$conf"
-# trigger
-# auto|boot|manual
-trigger=auto
-
-# this will make version 2 the default (Mwahahahahaha)
+  cat > "$conf" <<EOF
+# XtremeBS v2 configuration
+# Every event block is optional. Start with all features disabled, then add
+# one setting at a time and reload from the WebUI or XBSctl reload.
 version=2
-
-# log file
-log_file=/sdcard/XtremeBS.log
-
-# log level
-log_level=1
-
-# delay
-# time in seconds
 delay=3
+log_file=$STATE_DIR/XtremeBS.log
+log_level=1
+notify=true
 
-# keep_on_charge
-# true|false
-# keep powersave on while charging
-keep_on_charge=true
+boot={
+}
 
-# handle_cores
-# auto|false|"cpu4 cpu5"
-handle_cores=false
+charging={
+}
 
-# disable_cores
-# false|auto|"cpu6 cpu7"
-disable_cores=false
+low_power={
+# keep_on_charge=true
+}
 
-# handle_apps
-# false|kill|nice|suspend
-handle_apps=false
+screen_off={
+}
 
-# allowlist (user apps)
-# a path /data/local/tmp/XtremeBS/apps.allow
-allowlist=/data/local/tmp/XtremeBS/apps.allow
-
-# denylist (system apps)
-# a path /data/local/tmp/XtremeBS/apps.deny
-denylist=/data/local/tmp/XtremeBS/apps.deny
-
-# handle_gms
-# false|kill|nice
-handle_gms=false
-
-# handle_proc
-# true|false
-handle_proc=false
-
-# process list
-# a path /data/local/tmp/XtremeBS/proc.list
-proc_file=/data/local/tmp/XtremeBS/proc.list
-
-# low_ram
-# true|false
-low_ram=false
-
-# doze
-# false|light|deep
-doze=false
-
-#kill_wifi
-# true|false
-kill_wifi=false
-
+manual={
+}
 EOF
-
+  chmod 600 "$conf" 2>/dev/null || true
 fi
 
-# check for migration
-version="$(getconf version 1)" # if version is not set, it is 1
-# check for a user wanting to switch to v2
-if [ "$(grep ".*={" "$conf" | head -n 1)" == "" ] && [ "$version" = "2" ]; then
+has_event_block() {
+  awk '
+    {
+      compact = $0
+      gsub(/[[:space:]]/, "", compact)
+      if (compact ~ /^[A-Za-z][A-Za-z0-9_.-]*=\{/) { found = 1; exit }
+    }
+    END { exit !found }
+  ' "$conf" 2>/dev/null
+}
+
+# Set logging before migration: migration itself emits diagnostics.  Validate
+# values originating in a hand-edited configuration so a malformed value does
+# not turn the daemon into a busy loop.
+version="$(getconf version 1)"
+log_file="$(getconf log_file "$STATE_DIR/XtremeBS.log")"
+log_level="$(getconf log_level 1)"
+case "$log_level" in
+  1|2|3) ;;
+  *) log_level=1 ;;
+esac
+mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
+[ -f "$log_file" ] && mv -f "$log_file" "$log_file.old" 2>/dev/null || true
+
+# Migrate a legacy config that explicitly selected v2 but does not yet contain
+# an event block. Fresh installs already receive a complete v2 config above.
+if [ "$version" = "2" ] && ! has_event_block; then
   migrate
+  version="$(getconf version 2)"
+  log_file="$(getconf log_file "$STATE_DIR/XtremeBS.log")"
+  log_level="$(getconf log_level 1)"
+  case "$log_level" in
+    1|2|3) ;;
+    *) log_level=1 ;;
+  esac
 fi
 
-# setup logging
-log_file=$(getconf log_file "/sdcard/XtremeBS.log")
-log_level=$(getconf log_level 3) # set debug by default
+delay="$(getconf delay 3)"
+case "$delay" in
+  ''|*[!0-9]*)
+    log_msg 1 "Invalid delay '$delay'; using 3 seconds"
+    delay=3
+    ;;
+esac
+[ "$delay" -lt 1 ] && delay=1
 
-# this fixes the infinite growth issue
-[ -f "$log_file" ] && mv "$log_file" "$log_file.old"
+# Set up the controller before Safe Mode checks.  In prior versions this file
+# was not created until the first polling pass, and Safe Mode spun at 100% CPU
+# while repeatedly trying to read it.
+ctl_file="$(getconf ctl_file "$STATE_DIR/xbs")"
+mkdir -p "$(dirname "$ctl_file")" 2>/dev/null || true
+: > "$ctl_file"
+chmod 600 "$ctl_file" 2>/dev/null || true
 
-# set ctl_file
-ctl_file=$(getconf ctl_file "/data/local/tmp/xbs")
-
-# persistent safe mode
-safe=$(getconf safemode 0)
+# Persistent Safe Mode.  Poll at the configured interval and use the same
+# locked controller protocol as normal operation.
+safe="$(getconf safemode 0)"
 if [ "$safe" = "1" ]; then
-  log_msg 1 "Safemode was found in the config file, Entering safemode."
+  log_msg 1 "Safemode was found in the config file, entering Safe Mode."
   notif "Safe Mode is Active"
-  until [ "$resume" = "resume" ] || [ $(getconf safemode 0) = "0" ]; do
-    resume=$(cat "$ctl_file")
+  resume=""
+  until [ "$resume" = "resume" ] || [ "$(getconf safemode 0)" = "0" ]; do
+    sleep "$delay"
+    read_ctl_command
+    resume="$CTL_COMMAND"
   done
-  sed -i '/safemode=1/d' "$conf"
-  sed -i '/safemode=0/d' "$conf"
-  log_msg 1 "Safemode was exited. Restarting the daemon."
-  exec "$0"
+  sed -i '/^safemode=1$/d; /^safemode=0$/d' "$conf"
+  log_msg 1 "Safemode exited. Restarting daemon."
+  restart_daemon
 fi
 
-delay=$(getconf delay 3)
-
-# auto map cores in case we need them
+# Auto map cores in case a profile uses auto, then find rfkill once.
 auto_map_cores
-
-# Find the rfkill command once and for all
 find_rfkill_command
 
-# check version and init
-if [ "$version" = 2 ]; then
-  log_msg 1 "Starting XtremeBS"
+if [ "$version" = "2" ]; then
+  log_msg 1 "Starting XtremeBS v2"
   init_v2
 else
   log_msg 1 "Starting XtremeBS in compatibility mode"
-  log_msg 1 "You should consider migrating to v2 of the config"
-  log_msg 1 "You can migrate by putting version=2 in your config"
+  log_msg 1 "Consider migrating by adding version=2 to the config"
 
-  lock="0" # fix all the checks v1
-  tr_changed="false" # v1 trigger changed
-
+  lock="0"
+  tr_changed="false"
   init_v1
 fi

@@ -82,7 +82,10 @@
         return response.text();
       })
       .then(data => {
-        alert('File saved successfully.');
+        if (data.trim().startsWith('ERROR:')) {
+          throw new Error(data);
+        }
+        alert(data.trim() || 'Configuration saved; reload queued.');
       })
       .catch(error => {
         console.error('Error saving the file:', error);

@@ -1,16 +1,9 @@
-#!/system/bin/bash
+#!/system/bin/sh
+CGI_DIR=${0%/*}
+[ "$CGI_DIR" = "$0" ] && CGI_DIR=.
+MODDIR=$(CDPATH= cd "$CGI_DIR/../.." 2>/dev/null && pwd)
+[ -n "$MODDIR" ] || exit 1
 
-# Set the Content-Type header for plain text
 echo "Content-type: text/plain"
 echo ""
-
-# Path to the configuration file
-STATUS_FILE="/data/local/tmp/XtremeBS/XtremeBS.status"
-
-# Read and output the file content
-if [ -f "$STATUS_FILE" ]; then
-    cat "$STATUS_FILE"
-else
-    echo "Error: Status Unavailable"
-    exit 1
-fi
+"$MODDIR/xbs-webui.sh" get-status

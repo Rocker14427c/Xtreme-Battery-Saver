@@ -1,16 +1,11 @@
-#!/system/bin/bash
+#!/system/bin/sh
+# Legacy localhost WebUI endpoint. Native KernelSU/ReSukiSU users use
+# webroot/index.html instead.
+CGI_DIR=${0%/*}
+[ "$CGI_DIR" = "$0" ] && CGI_DIR=.
+MODDIR=$(CDPATH= cd "$CGI_DIR/../.." 2>/dev/null && pwd)
+[ -n "$MODDIR" ] || exit 1
 
-# Set the Content-Type header for plain text
 echo "Content-type: text/plain"
 echo ""
-
-# Path to the configuration file
-CONFIG_FILE="/data/local/tmp/XtremeBS/XtremeBS.conf"
-
-# Read and output the file content
-if [ -f "$CONFIG_FILE" ]; then
-    cat "$CONFIG_FILE"
-else
-    echo "Error: Configuration file not found"
-    exit 1
-fi
+"$MODDIR/xbs-webui.sh" get-config

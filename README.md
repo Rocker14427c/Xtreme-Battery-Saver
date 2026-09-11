@@ -1,262 +1,184 @@
+# Xtreme Battery Saver
 
-# XtremeBS (Xtreme Battery Saver)
+A systemless Android battery-saving module originally created by **DethByte64**. This fork keeps the original event-driven XtremeBS features and adds a working native **KernelSU / ReSukiSU WebUI**, safer module-path handling, and CPU hotplug reliability fixes.
 
-**Maximize your Android device’s battery life with highly configurable power-saving tools.**
+> **Important:** this is an advanced module. App suspension, forced Doze, Wi-Fi changes, CPU governor changes, and CPU hotplug can delay notifications, break alarms, slow the device, or make a bad configuration difficult to recover from. Start with one change at a time.
 
-**XtremeBS** is a Magisk/KernelSU module designed for rooted Android devices, offering aggressive battery optimization through dynamic, event-driven settings. It allows advanced users to fine-tune CPU cores, apps, WiFi, Doze mode, and more to extend battery life significantly—potentially up to 5x stock uptime. While powerful, it requires careful configuration to avoid lag, missed notifications, or device instability.
+## Why ReSukiSU showed no WebUI button
 
-> [!NOTE]
-> An Android app is in development to simplify configuration and enhance usability. The current web UI (v1.0.6+) will be replaced upon app release.
+The upstream package contains a directory named `webui/`, which is only a legacy localhost site started by `action.sh`. KernelSU-family managers discover a native module WebUI from **`webroot/index.html`**, not `webui/`. Therefore ReSukiSU correctly did not mark the original module as having a WebUI.
 
----
+This fork adds `webroot/index.html` and a root-side helper. After installing **this fork's rebuilt `XtremeBS.zip`** and rebooting, open the module details in ReSukiSU and use its **WebUI** button. It does not depend on a localhost web server.
 
-## Features
+- **KernelSU / ReSukiSU:** use the native **WebUI** button.
+- **Managers without native WebUI:** use the module **Action** button for the old browser-based fallback at `http://127.0.0.1:8081`.
+- If the button still is not visible after upgrading, ensure that the installed directory contains `/data/adb/modules/XtremeBS/webroot/index.html`, the module is enabled, then refresh/reopen the manager. Installing the old upstream ZIP will not add that directory.
 
-- **App Management**: Kill, suspend, or reprioritize apps with allowlists and denylists for user and system apps.
-- **CPU Optimization**: Set CPU cores to powersave mode or disable high-power cores automatically or manually.
-- **System Tweaks**: Force Doze mode (light/deep), disable WiFi, enable low RAM mode, or manage Google Mobile Services (GMS) and process priorities.
-- **Event-Driven Control (v2)**: Apply settings based on triggers like `boot`, `charging`, `screen_off`, `low_power`, or custom events.
-- **User-Friendly Tools**: Control via `XBSctl` commands, monitor with logs and status files, and configure via a web UI (v1.0.6+).
-- **Safety Features**: Safe mode to recover from misconfigurations and sanity checks to prevent system crashes.
+## Install
 
----
+1. Download the rebuilt `XtremeBS.zip` from this repository.
+2. Install it in Magisk, KernelSU, or ReSukiSU.
+3. Reboot once. The service starts only after Android reports boot complete.
+4. In ReSukiSU, open **Modules → Xtreme Battery Saver → WebUI**.
+5. Before enabling any aggressive setting, open **Dashboard → Run diagnostics** and confirm the daemon and screen-state source are visible.
 
-## Supported Root Managers
+The runtime files are deliberately kept outside the module folder so an update does not erase them:
 
-- **Magisk** (Confirmed)
-- **KernelSU** (Confirmed)
-- **APatch** (Likely compatible; please report results on [GitHub Issues](https://github.com/DethByte64/Xtreme-Battery-Saver/issues))
+```text
+/data/local/tmp/XtremeBS/XtremeBS.conf        configuration
+/data/local/tmp/XtremeBS/XtremeBS.status      latest status
+/data/local/tmp/XtremeBS/XtremeBS.log         default daemon log for new configs
+/data/local/tmp/XtremeBS/XtremeBS.service.log service startup/errors
+```
 
----
+Existing configurations that use `/sdcard/XtremeBS.log` keep that location; only new configs use the private runtime directory by default.
 
-## Disclaimer
+## Your ScreenOff CoresOff feature in XtremeBS
 
-XtremeBS is an advanced tool that modifies system behavior and requires root access. Misconfiguration may cause lag, missed notifications, alarms, or SystemUI crashes. **Use at your own risk**. I is not responsible for damages or data loss. Always back up your config and test settings incrementally.
+**Yes.** XtremeBS has the equivalent feature through the `screen_off` v2 event and `disable_cores` option. It is **not enabled by default** in the upstream module.
 
-Tested primarily on a **Pixel 5** running **ProtonAOSP**. Compatibility varies by device and ROM.
+For the same behavior as your eight-core ScreenOff CoresOff module—keep `cpu0` online and take `cpu1` through `cpu7` offline while the screen is off—use:
 
----
-
-## Installation
-
-1. **Download the Module**:
-   - Grab the latest release from [GitHub Releases](https://github.com/DethByte64/Xtreme-Battery-Saver/releases/latest).
-   - Alternatively, install via [MMRL](https://mmrl.dev/) for easy updates:  
-     [![MMRL](https://mmrl.dev/assets/badge.svg)](https://mmrl.dev/repository/zguectZGR/Xtreme-Battery-Saver)
-
-2. **Install**:
-   - Flash the module in your root manager (Magisk/KernelSU).
-   - Reboot your device.
-
-3. **Configure**:
-   - A default config file is created at `/data/local/tmp/XtremeBS/XtremeBS.conf`.
-   - Edit the config manually or use the web UI (http://127.0.0.1:8081, launched via `action.sh` in v1.0.6+).
-   - After changes, reload the config with `XBSctl reload` or reboot.
-
----
-
-## Configuration
-
-XtremeBS uses a configuration file (`/data/local/tmp/XtremeBS/XtremeBS.conf`) to control its behavior. It supports two formats:
-
-- **v1 (Legacy)**: Simple `key=value` pairs. Suitable for basic setups but less flexible.
-- **v2 (Recommended)**: Event-driven blocks (e.g., `screen_off={...}`) for dynamic control based on device states or custom triggers.
-
-> [!TIP]
-> Set `version=2` in the config to enable v2 mode. The module automatically migrates v1 configs to v2 if detected.
-
-### v2 Configuration (Recommended)
-
-v2 uses **event blocks** to apply settings for specific triggers:
-- **Hardcoded Events**: `boot`, `charging`, `screen_off`, `low_power`, `manual` (triggered by device states or `XBSctl`).
-- **Custom Events**: User-defined (e.g., `my_event`), triggered manually via `XBSctl start my_event`.
-
-Each block contains settings like `disable_cores` or `handle_apps`. Example:
-
-```bash
+```ini
 version=2
-delay=3
-log_file=/sdcard/XtremeBS.log
-log_level=3
+delay=1
+log_file=/data/local/tmp/XtremeBS/XtremeBS.log
+log_level=2
+notify=false
 
-screen_off={
-  disable_cores=cpu6 cpu7
-  handle_apps=nice
-  allowlist=/data/local/tmp/XtremeBS/apps.allow
+boot={
+}
+
+charging={
 }
 
 low_power={
-  disable_cores=cpu2 cpu3 cpu4 cpu5
-  doze=light
-  kill_wifi=true
 }
 
-my_event={
-  handle_gms=nice
-  low_ram=true
+screen_off={
+  disable_cores=cpu1 cpu2 cpu3 cpu4 cpu5 cpu6 cpu7
+}
+
+manual={
 }
 ```
 
-**Rules**:
-- Each block starts with `event_name={` and ends with `}` on separate lines.
-- Use alphanumeric characters, underscores, or dashes for custom event names (no spaces, `$`, `=`, `{`, or `}`).
-- Empty blocks (e.g., `boot={
-  }`) do nothing.
-- Multiple events can stack (e.g., `screen_off` and `low_power` disabling different cores) these work in a Last on, First off method, plan accordingly.
+Or, in the new native WebUI, select **“Replace config with this preset”** under **CPU0-only screen-off preset**. It discovers every available `cpuN/online` node, excludes `cpu0`, and writes the equivalent list for the actual device topology. On a Helio G85 exposing `cpu1`–`cpu7`, that is the same core list as your basic module.
 
-### v1 Configuration (Legacy)
+### What to expect
 
-v1 uses a single `trigger` to apply settings globally. Example:
+- Screen off → configured CPUs are written to `0` (offline).
+- Screen on → CPUs that XtremeBS actually took offline are written back to `1` (online); a CPU that was already offline before the event is left alone.
+- The updated daemon verifies each write and retries a refused hotplug operation up to three times.
+- `cpu0` is always refused by a safety guard, even if accidentally added to `disable_cores`.
+- A kernel may pin a CPU or reject hotplugging a complete cluster. That is a device/kernel restriction, not something a Magisk/KernelSU module can override.
 
-```bash
-version=1
-trigger=auto
+Verify it manually:
+
+```sh
+su -c 'cat /sys/devices/system/cpu/online'
+```
+
+For the example above, it should normally show `0` while the screen is off and `0-7` after waking. Check the log for an individual CPU if the kernel uses a different online-range format.
+
+### Do not run both modules for the same CPUs
+
+Your `ScreenOff-CoresOff-v2.1-stable.zip` and this XtremeBS screen-off profile both write the same CPU hotplug nodes. Do **not** enable both at once. Keep the small dedicated module if you prefer its backlight-first detection and minimal scope; use the XtremeBS profile if you want it integrated with the rest of XtremeBS.
+
+The dedicated module polls a backlight node first when one exists, so it can react faster on compatible devices. XtremeBS uses `dumpsys deviceidle get screen` and now falls back to `dumpsys power`; with `delay=1`, its normal reaction time is about one polling interval. The end result is equivalent when both screen-state sources work, but the timing mechanism is not identical.
+
+## v2 configuration
+
+XtremeBS v2 is event-based. Each block is activated by a system state or by `XBSctl`:
+
+| Event | Activates when |
+| --- | --- |
+| `boot` | The daemon starts; remains active for that daemon run. |
+| `charging` | External power is connected. |
+| `low_power` | Android's AOSP Battery Saver setting is enabled. |
+| `screen_off` | The screen is off. |
+| `manual` | You run `XBSctl start`. |
+| `my_event` | A custom event that you start with `XBSctl start my_event`. |
+
+A minimal safe v2 file is created automatically on a fresh install. Values inside a block may be indented; this fork explicitly supports the indented style shown in the examples.
+
+Common options:
+
+| Option | Values | Meaning |
+| --- | --- | --- |
+| `delay` | integer seconds, minimum `1` | How often XtremeBS checks events and queued commands. |
+| `notify` | `true` / `false` | Enable the XtremeBS status notifications. |
+| `disable_cores` | `false`, `auto`, or `cpuN cpuN` | Offline selected CPUs. `auto` selects the highest-frequency cluster when topology is unambiguous; use an explicit list for CPU0-only mode. |
+| `handle_cores` | `false`, `auto`, or `cpuN cpuN` | Set selected CPUs to the `powersave` governor when the kernel exposes it. |
+| `handle_apps` | `false`, `nice`, `kill`, `suspend` | Apply aggressive user-app handling. `suspend` needs a safe allowlist. |
+| `allowlist` / `denylist` | file paths | App package lists used by app handling. |
+| `handle_gms` | `false`, `nice`, `kill` | Change Google Play services behavior; `kill` is disruptive. |
+| `handle_proc` | `true` / `false` | Reprioritize processes named in `proc_file`. |
+| `low_ram` | `true` / `false` | Toggle `ro.config.low_ram`; can destabilize ROMs. |
+| `doze` | `false`, `light`, `deep` | Force Android Doze. This can delay alarms and notifications. |
+| `kill_wifi` | `true` / `false` | Disable Wi-Fi while the event is active. |
+| `keep_on_charge` | `true` / `false` | Keep a non-charging profile active while charging. Use carefully. |
+
+Example low-power profile that only disables the big cores:
+
+```ini
+version=2
 delay=3
-keep_on_charge=true
-handle_cores=auto
-disable_cores=false
-handle_apps=suspend
-allowlist=/data/local/tmp/XtremeBS/apps.allow
+notify=false
+
+low_power={
+  disable_cores=cpu6 cpu7
+  doze=light
+}
+
+screen_off={
+}
 ```
 
-> [!NOTE]
-> v1 is backward compatible but will be deprecated in future releases. Consider switching to v2 for advanced features.
+When a screen-off event exits while another event remains active, this fork immediately reapplies the remaining active event(s). That fixes the upstream behavior where waking the phone could leave cores re-enabled even though `low_power` was still active. It is a reconciliation pass, not a full atomic priority system, so avoid mixing conflicting aggressive actions until you have tested them.
 
-### Config Options
+## Controller and recovery
 
-| Option | Description | Values | Default | Notes |
-|--------|-------------|--------|---------|-------|
-| `version` | Config format | `1`, `2` | `2` | Set to `2` for event-driven mode. |
-| `trigger` (v1 only) | When to apply settings | `auto` (Battery Saver), `boot`, `manual` | `auto` | Ignored in v2. |
-| `delay` | Polling interval (seconds) | Integer | `3` | Higher values reduce CPU usage, but may takr longer to detect events and commands. Lower values may use more CPU cycles, but provide faster detection. |
-| `keep_on_charge` | Keep settings active while charging | `true`, `false` | `true` | Only useful with `trigger=auto` (v1) or `low_power` (v2). |
-| `handle_apps` | Manage app behavior | `false`, `kill`, `nice`, `suspend` | `false` | `suspend` requires a valid allowlist. |
-| `allowlist` | File with allowed app packages | Path (e.g., `/data/local/tmp/XtremeBS/apps.allow`) | `/data/local/tmp/XtremeBS/apps.allow` | Create manually; list one package per line (e.g., `com.termux`). |
-| `denylist` | File with system apps to manage | Path (e.g., `/data/local/tmp/XtremeBS/apps.deny`) | `/data/local/tmp/XtremeBS/apps.deny` | Optional; for system apps. |
-| `handle_cores` | Set CPU governors to powersave | `false`, `auto`, Space-separated cores (e.g., `cpu4 cpu5`) | `false` | `auto` targets low-power cores. |
-| `disable_cores` | Disable CPU cores | `false`, `auto`, Space-separated cores (e.g., `cpu6 cpu7`) | `false` | `auto` disables high-power cores; avoid on Samsung devices. |
-| `handle_gms` | Manage Google Mobile Services | `false`, `nice`, `kill` | `false` | `kill` breaks Google apps and SafetyNet/Play Integrity. |
-| `handle_proc` | Reprioritize system processes | `true`, `false` | `false` | Use with `proc_file`; may delay messages/alarms. |
-| `proc_file` | File with processes to reprioritize | Path (e.g., `/data/local/tmp/XtremeBS/proc.list`) | `/data/local/tmp/XtremeBS/proc.list` | Format: `process_name nice_level` (e.g., `netd 19`). |
-| `low_ram` | Enable low RAM mode | `true`, `false` | `false` | Avoid on OnePlus devices; may cause random reboots. |
-| `doze` | Force Doze mode | `false`, `light`, `deep` | `false` | May break alarms; test carefully. |
-| `kill_wifi` | Disable WiFi | `true`, `false` | `false` | Saves power but disables WiFi toggle in Settings. |
-| `notify` | Show notifications | `true`, `false` | `true` | Disable to not use notifications. |
-| `log_file` | Log file path | Path (e.g., `/sdcard/XtremeBS.log`) | `/sdcard/XtremeBS.log` | Set `log_level` for verbosity. |
-| `log_level` | Logging verbosity | `1` (INFO), `2` (VERBOSE), `3` (DEBUG) | `2` | Higher levels aid debugging. |
+The direct controller path works even when KernelSU does not mount `system/bin`:
 
-**Allowlist Example** (`apps.allow`):
-```bash
-com.termux
-com.google.android.inputmethod.latin
-com.topjohnwu.magisk
+```sh
+XBSCTL=/data/adb/modules/XtremeBS/system/bin/XBSctl
+su -c "$XBSCTL reload"
+su -c "$XBSCTL start"             # v2 manual event
+su -c "$XBSCTL start my_event"    # custom event
+su -c "$XBSCTL stop my_event"
+su -c "$XBSCTL pause"
+su -c "$XBSCTL resume"
+su -c "$XBSCTL safe"
+su -c "$XBSCTL status"
 ```
 
-**Process File Example** (`proc.list`):
-```bash
-netd 19
-system_server 10
+`safe` stops active XtremeBS events and unsuspends apps. If a bad persistent profile applies again at boot, disable or remove the module from the root manager/recovery, then edit or delete:
+
+```text
+/data/local/tmp/XtremeBS/XtremeBS.conf
 ```
 
-> [!CAUTION]
-> Always include essential apps (e.g., keyboard, terminal) in `apps.allow` when using `handle_apps=suspend`. Without a valid allowlist, apps may become unusable, requiring `XBSctl safe` via ADB.
+The service startup log is especially useful if the config directory or daemon did not appear:
 
----
+```sh
+su -c 'cat /data/local/tmp/XtremeBS/XtremeBS.service.log'
+```
 
-## XBSctl Commands
+## Compatibility and limits
 
-Control XtremeBS with the `XBSctl` command-line tool (run as root via `su`):
+- The bundled Bash executable is **AArch64**. This module is intended for 64-bit ARM Android devices; the service logs a clear warning for another reported ABI.
+- KernelSU/ReSukiSU does not need a metamodule for this fork's daemon to run: it invokes the bundled files directly from `/data/adb/modules/XtremeBS/`. A metamodule is only relevant if you want the legacy `/system/bin/XBSctl` mount path.
+- CPU names, hotplug permissions, available governors, and `dumpsys` output vary by kernel and ROM. Use Dashboard diagnostics before trusting a profile.
+- Xiaomi/MIUI and other OEM Battery Saver implementations may not update AOSP `settings global low_power`; use `screen_off`, `manual`, or an automation-triggered custom event in that case.
+- New WebUI code was checked with a simulated Android command/CPU-node fixture. It still needs real-device testing on your ROM before enabling destructive options.
 
-| Command | Description | Usage |
-|---------|-------------|-------|
-| `start` | Start XtremeBS (v1) or an event (v2) | `XBSctl start` (v1/manual) or `XBSctl start my_event` (v2) |
-| `stop` | Stop XtremeBS (v1) or an event (v2) | `XBSctl stop` (v1/manual) or `XBSctl stop my_event` (v2) |
-| `reload` | Reload the config | `XBSctl reload` |
-| `pause` | Pause trigger handling | `XBSctl pause` |
-| `resume` | Resume trigger handling or exit safe mode | `XBSctl resume` |
-| `safe` | Enter safe mode (stops XtremeBS, unsuspends apps) | `XBSctl safe` |
+See [AUDIT.md](AUDIT.md) for the focused source audit, fixes, and known remaining limits.
 
-> [!TIP]
-> Use `XBSctl safe` via ADB (`adb shell XBSctl safe`) if the device becomes unresponsive due to misconfiguration.
+## Credits and license
 
----
+- Original module: [DethByte64/Xtreme-Battery-Saver](https://github.com/DethByte64/Xtreme-Battery-Saver)
+- Upstream mirror: [Magisk-Modules-Alt-Repo/Xtreme-Battery-Saver](https://github.com/Magisk-Modules-Alt-Repo/Xtreme-Battery-Saver)
+- This compatibility fork: Rocker14427c
 
-## Usage Tips
-
-1. **Start Slow**:
-   - Enable one option at a time (e.g., `handle_apps=nice`) and test for 24 hours to ensure stability.
-   - Avoid aggressive settings like `disable_cores` initially, especially on Samsung or OnePlus devices.
-
-2. **Debugging**:
-   - Check `/data/local/tmp/XtremeBS/XtremeBS.status` for CPU, WiFi, and Doze states.
-   - Set `log_level=3` and review `/sdcard/XtremeBS.log` for detailed logs if issues occur.
-   - Run `su -c ps -eo "%cpu pid cmd" | sort -n -k1,1` to identify high-CPU processes for `proc_file`.
-
-3. **Device-Specific Notes**:
-   - **Samsung Devices**: Avoid `disable_cores` and `handle_cores` to prevent reboots or SystemUI crashes.
-   - **OnePlus Devices**: Disable `low_ram` to avoid random reboots.
-
-4. **Security**:
-   - Restrict config file permissions: `chmod 600 /data/local/tmp/XtremeBS/*`.
-   - Avoid sharing configs, as they may include sensitive app data or cause instability on different devices.
-
----
-
-## FAQ
-
-**Q: My device soft-loops or SystemUI crashes. What do I do?**  
-**A**: You likely enabled too many aggressive options. Enter safe mode with `adb shell XBSctl safe`, disable risky settings (e.g., `disable_cores`, `low_ram`), and test incrementally. Check logs for clues.
-
-**Q: Will XtremeBS brick my device?**  
-**A**: No, it won’t cause hard bootloops. However, misconfigurations can cause lag, missed alarms, or crashes. Always back up your device.
-
-**Q: Is XtremeBS plug-and-play?**  
-**A**: No, it requires manual configuration. Start with the default config and adjust based on your device’s needs. An app is in development to simplify this.
-
-**Q: How effective is XtremeBS?**  
-**A**: With proper tuning, it can extend battery life significantly. Effectiveness depends on your config and device.
-
-**Q: Why does my config not take effect?**  
-**A**: Ensure you run `XBSctl reload` or reboot after changes. Verify event names (v2) are valid and check logs for errors. Use the web UI to avoid syntax issues.
-
-**Q: Can I use XtremeBS with other battery-saving modules?**  
-**A**: Yes, but conflicts may occur (e.g., with L Speed, Naptime). Disable overlapping features in other modules and test thoroughly.
-
----
-
-## Troubleshooting
-
-- **Unresponsive Device**: Boot into recovery, edit `/data/local/tmp/XtremeBS/XtremeBS.conf` to set `safemode=1`, reboot, and fix the config.
-- **No Battery Improvement**: Verify active events (`XBSctl status` in future releases or check logs). Try `handle_apps=suspend` with a robust allowlist.
-- **Missed Alarms/Notifications**: Disable `doze` or `handle_proc`, as they may delay background tasks.
-- **Report Issues**: Open a [GitHub Issue](https://github.com/DethByte64/Xtreme-Battery-Saver/issues) with your config, device details, and logs.
-
----
-
-## Contributing
-
-We welcome contributions! To contribute:
-
-1. Fork the repository: [DethByte64/Xtreme-Battery-Saver](https://github.com/DethByte64/Xtreme-Battery-Saver).
-
-2. Submit pull requests with bug fixes, features, or documentation improvements.
-
-3. Report bugs or suggest features via [GitHub Issues](https://github.com/DethByte64/Xtreme-Battery-Saver/issues).
-
----
-
-## Acknowledgments
-
-- Thanks to the Magisk and KernelSU communities for root support.
-
-- [DerGoogler](https://github.com/DerGoogler) for MMRL and their work in MMAR
-
-- Special thanks to NanKillBro for KernelSU testing.
-
-- Gratitude to XDA and Reddit users for feedback and testing.
-
----
-
-## License
-
-XtremeBS is released under the [GPLv3 License](LICENSE.md).
+XtremeBS is released under the [GPLv3 License](LICENSE).

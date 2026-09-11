@@ -1,3 +1,10 @@
+### v2.1.5-rs1 — ReSukiSU / KernelSU compatibility and reliability
+  - Added `webroot/index.html`, so KernelSU and ReSukiSU show a native WebUI button instead of requiring the legacy localhost Action flow.
+  - Made the daemon launch directly from the module directory; it no longer relies on `/system/bin` mounting or waits for `/sdcard/Android`.
+  - Added a native CPU0-only screen-off preset that discovers available hotpluggable CPUs and writes the equivalent `screen_off` profile.
+  - Fixed indented v2 event keys being ignored, manual governor writes/restores, ambiguous auto core mapping, CPU write verification/retries, preservation of already-offline CPUs, and rfkill multi-word command execution.
+  - Fixed controller command races, Safe Mode busy loops, the v1 charging-state cleanup call, v1→v2 controller/manual migration errors, and re-applies remaining events after an overlapping event exits.
+  - Kept the old action/httpd UI only as a hardened fallback for managers without a native WebUI.
 
 ### v2.1.4
   - Improve Wifi handling - Authored by [vikasmistry](https://github.com/vikasmistry)

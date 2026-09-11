@@ -45,7 +45,7 @@
     }
   </style>
 </head>
-<body onload="setInterval(loadFileOnLoad, 1000);">
+<body onload="loadFileOnLoad(); setInterval(loadFileOnLoad, 3000);">
 <!--  <h1>XtremeBS.conf</h1> -->
   <div id="editor-container">
     <textarea readonly id="editor" wrap="soft"></textarea>
@@ -62,7 +62,7 @@
         })
         .catch(error => {
           console.error('Error loading the file:', error);
-          alert('Could not load the file.');
+          document.getElementById('editor').value = 'Status unavailable. Check /data/local/tmp/XtremeBS/XtremeBS.service.log.';
         });
     }
   </script>

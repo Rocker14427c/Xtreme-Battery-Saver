@@ -50,7 +50,7 @@
   <div id="editor-container">
     <textarea readonly id="editor" wrap="soft"></textarea>
   </div>
-  <button onclick="saveFile()">Save To External Storage</button>
+  <button onclick="saveFile()">Export Copy To External Storage</button>
 
   <script>
     function loadFileOnLoad() {
@@ -84,7 +84,10 @@
         return response.text();
       })
       .then(data => {
-        alert('File saved successfully.');
+        if (data.trim().startsWith('ERROR:')) {
+          throw new Error(data);
+        }
+        alert(data.trim() || 'Log exported successfully.');
       })
       .catch(error => {
         console.error('Error saving the file:', error);

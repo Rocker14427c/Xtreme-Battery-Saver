@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Xtreme Battery Saver</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #10151d;
+      --surface: #18212d;
+      --surface-strong: #222e3d;
+      --border: #34445a;
+      --text: #edf3fb;
+      --muted: #aab8c9;
+      --primary: #75d7a8;
+      --primary-ink: #062717;
+      --warning: #ffd47a;
+      --danger: #ff9c9c;
+      --code: #0a0f16;
+      --focus: #98c8ff;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        color-scheme: light;
+        --bg: #f4f7fb;
+        --surface: #ffffff;
+        --surface-strong: #edf3f9;
+        --border: #c9d6e5;
+        --text: #142235;
+        --muted: #526478;
+        --primary: #18794e;
+        --primary-ink: #ffffff;
+        --warning: #795900;
+        --danger: #a32121;
+        --code: #f1f5f9;
+        --focus: #1466bb;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 900px; margin: 0 auto; padding: 20px 16px 40px; }
+    header { display: flex; gap: 14px; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
+    h1 { font-size: clamp(1.35rem, 5vw, 1.8rem); line-height: 1.2; margin: 0; }
+    h2 { font-size: 1.1rem; margin: 0 0 10px; }
+    h3 { font-size: 1rem; margin: 18px 0 8px; }
+    p { margin: 8px 0; }
+    .subtitle, .muted { color: var(--muted); }
+    .badge { flex: none; border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 5px 9px; color: var(--primary); font-size: .78rem; font-weight: 700; white-space: nowrap; }
+    .notice { border: 1px solid color-mix(in srgb, var(--warning) 52%, var(--border)); background: color-mix(in srgb, var(--warning) 9%, var(--surface)); border-radius: 10px; padding: 12px; color: var(--text); margin: 0 0 15px; }
+    .notice strong { color: var(--warning); }
+    .bridge-error { display: none; border-color: color-mix(in srgb, var(--danger) 58%, var(--border)); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
+    .tabs { display: flex; overflow-x: auto; gap: 7px; margin: 0 -2px 16px; padding: 2px; scrollbar-width: thin; }
+    button, .tab {
+      font: inherit;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 9px 12px;
+      color: var(--text);
+      background: var(--surface-strong);
+      cursor: pointer;
+      min-height: 40px;
+    }
+    button:hover, .tab:hover { border-color: var(--primary); }
+    button:focus-visible, .tab:focus-visible, textarea:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    button:disabled { cursor: wait; opacity: .58; }
+    .tab { white-space: nowrap; background: var(--surface); }
+    .tab[aria-selected="true"] { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); font-weight: 700; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 15px; margin-bottom: 14px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .primary { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); font-weight: 700; }
+    .danger { border-color: color-mix(in srgb, var(--danger) 63%, var(--border)); color: var(--danger); }
+    .small { padding: 6px 9px; min-height: 34px; font-size: .88rem; }
+    textarea, pre {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--code);
+      color: var(--text);
+      font: 12.5px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+    textarea { min-height: 390px; padding: 12px; resize: vertical; }
+    pre { margin: 0; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 118px; max-height: 400px; overflow: auto; }
+    .toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; margin: 10px 0 0; }
+    .status-line { min-height: 22px; color: var(--muted); margin: 4px 0 0; }
+    .status-line.error { color: var(--danger); }
+    code { background: var(--code); border-radius: 4px; padding: 1px 4px; color: var(--primary); }
+    ul { padding-left: 21px; margin: 8px 0; }
+    li + li { margin-top: 6px; }
+    .split { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); }
+    .label { color: var(--muted); font-size: .84rem; margin-bottom: 7px; display: block; }
+    @media (max-width: 410px) { main { padding: 16px 12px 32px; } header { gap: 8px; } .card { padding: 12px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Xtreme Battery Saver</h1>
+        <p class="subtitle">Native module controls for KernelSU and ReSukiSU</p>
+      </div>
+      <span class="badge">WebUI</span>
+    </header>
+
+    <section id="bridge-error" class="notice bridge-error" role="alert">
+      <strong>Root bridge unavailable.</strong> This page must be opened using the module’s WebUI button in a compatible manager. The legacy Magisk action button can still open the localhost fallback.
+    </section>
+
+    <section class="notice">
+      <strong>Safety first.</strong> CPU hotplug, app suspension, forced Doze, and Wi-Fi changes can make a device slow or unavailable. Change one option at a time. If a configuration causes trouble, use <code>XBSctl safe</code> or remove the module from recovery/ADB.
+    </section>
+
+    <nav class="tabs" aria-label="XtremeBS sections" role="tablist">
+      <button class="tab" id="tab-dashboard" role="tab" aria-selected="true" aria-controls="dashboard">Dashboard</button>
+      <button class="tab" id="tab-config" role="tab" aria-selected="false" aria-controls="config">Configuration</button>
+      <button class="tab" id="tab-log" role="tab" aria-selected="false" aria-controls="log">Log</button>
+      <button class="tab" id="tab-help" role="tab" aria-selected="false" aria-controls="help">Help</button>
+    </nav>
+
+    <section id="dashboard" class="panel active" role="tabpanel" aria-labelledby="tab-dashboard">
+      <article class="card">
+        <div class="toolbar">
+          <h2>Latest daemon status</h2>
+          <button class="small" data-action="refresh-status">Refresh</button>
+        </div>
+        <pre id="status-output" aria-live="polite">Loading status…</pre>
+        <p id="command-message" class="status-line" aria-live="polite"></p>
+      </article>
+
+      <div class="split">
+        <article class="card">
+          <h2>Manual controls</h2>
+          <p class="muted">These queue a command; the daemon processes it on its next polling pass.</p>
+          <div class="actions">
+            <button data-command="start" class="primary">Start manual event</button>
+            <button data-command="stop">Stop manual event</button>
+            <button data-command="pause">Pause</button>
+            <button data-command="resume">Resume</button>
+            <button data-command="safe" class="danger">Enter Safe Mode</button>
+          </div>
+        </article>
+        <article class="card">
+          <h2>CPU0-only screen-off preset</h2>
+          <p class="muted">Creates a minimal v2 config that offlines every CPU with an online node except CPU0 while the screen is off, then restores those CPUs when it turns on.</p>
+          <button id="cpu0-preset" class="danger">Replace config with this preset</button>
+        </article>
+      </div>
+
+      <article class="card">
+        <div class="toolbar">
+          <h2>Diagnostics</h2>
+          <button class="small" data-action="diagnostics">Run diagnostics</button>
+        </div>
+        <pre id="diagnostic-output">Tap “Run diagnostics” to inspect screen state, CPU nodes, and service startup.</pre>
+      </article>
+    </section>
+
+    <section id="config" class="panel" role="tabpanel" aria-labelledby="tab-config">
+      <article class="card">
+        <h2>Configuration editor</h2>
+        <p class="muted">Saved atomically to <code>/data/local/tmp/XtremeBS/XtremeBS.conf</code>, then a reload is queued. Existing v1 configs remain supported, but v2 event blocks are recommended.</p>
+        <label class="label" for="config-editor">XtremeBS.conf</label>
+        <textarea id="config-editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="XtremeBS configuration"></textarea>
+        <div class="toolbar">
+          <div class="actions">
+            <button id="save-config" class="primary">Save and reload</button>
+            <button id="reload-config">Reload without saving</button>
+          </div>
+          <button id="load-config" class="small">Discard edits and reload file</button>
+        </div>
+      </article>
+    </section>
+
+    <section id="log" class="panel" role="tabpanel" aria-labelledby="tab-log">
+      <article class="card">
+        <div class="toolbar">
+          <h2>Latest log entries</h2>
+          <div class="actions">
+            <button id="refresh-log" class="small">Refresh</button>
+            <button id="copy-log" class="small">Copy</button>
+          </div>
+        </div>
+        <pre id="log-output">Tap Refresh to load up to the last 500 log lines.</pre>
+      </article>
+    </section>
+
+    <section id="help" class="panel" role="tabpanel" aria-labelledby="tab-help">
+      <article class="card">
+        <h2>Screen-off CPU profile</h2>
+        <p>The feature from ScreenOff CoresOff is available here through a v2 <code>screen_off</code> block. On an eight-core device, the equivalent manual configuration is:</p>
+        <pre>version=2
+delay=1
+
+screen_off={
+  disable_cores=cpu1 cpu2 cpu3 cpu4 cpu5 cpu6 cpu7
+}</pre>
+        <p>CPU0 is deliberately omitted. The module now checks writes and retries a refused online/offline change up to three times; a kernel can still reject hotplugging some cores.</p>
+      </article>
+      <article class="card">
+        <h2>Useful commands</h2>
+        <ul>
+          <li><code>su -c /data/adb/modules/XtremeBS/system/bin/XBSctl reload</code> reloads the config without relying on a system mount.</li>
+          <li><code>su -c /data/adb/modules/XtremeBS/system/bin/XBSctl safe</code> enters Safe Mode if a profile is too aggressive.</li>
+          <li><code>su -c 'cat /sys/devices/system/cpu/online'</code> shows which CPUs are currently online.</li>
+          <li>After installation/update, reboot once so the service starts from the module directory.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>How this UI works</h2>
+        <p>KernelSU/ReSukiSU recognizes a module WebUI only when the module has <code>webroot/index.html</code>. This page uses the manager’s root bridge rather than the old localhost CGI server. On managers without a native WebUI button, use the module Action button for the legacy browser fallback.</p>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      'use strict';
+      const fallbackModuleDir = '/data/adb/modules/XtremeBS';
+      let moduleDir = fallbackModuleDir;
+      let busy = false;
+
+      const byId = (id) => document.getElementById(id);
+      const bridge = () => window.ksu && typeof window.ksu.exec === 'function' ? window.ksu : null;
+      const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
+      function setMessage(message, isError = false) {
+        const output = byId('command-message');
+        output.textContent = message || '';
+        output.classList.toggle('error', isError);
+      }
+
+      function setBusy(value) {
+        busy = value;
+        document.querySelectorAll('button').forEach((button) => {
+          button.disabled = value;
+        });
+      }
+
+      function discoverModuleDir() {
+        const api = bridge();
+        if (!api || typeof api.moduleInfo !== 'function') return;
+        try {
+          const info = JSON.parse(String(api.moduleInfo()));
+          if (info && typeof info.moduleDir === 'string' && info.moduleDir.startsWith('/data/adb/modules/')) {
+            moduleDir = info.moduleDir;
+          }
+        } catch (_) {
+          // The fixed module-id path remains a safe fallback.
+        }
+      }
+
+      async function root(command) {
+        const api = bridge();
+        if (!api) throw new Error('The KernelSU/ReSukiSU root bridge is unavailable.');
+        const result = await Promise.resolve(api.exec(command));
+        // ReSukiSU returns stdout directly. Accept structured results too so
+        // the static page remains usable with compatible KernelSU bridges.
+        if (result && typeof result === 'object') {
+          const code = Number(result.code ?? 0);
+          const stdout = String(result.stdout ?? result.output ?? '');
+          if (code !== 0) throw new Error(String(result.stderr ?? stdout ?? `Root command failed (${code})`));
+          return stdout;
+        }
+        return String(result ?? '');
+      }
+
+      function helperCommand(...args) {
+        return `${shellQuote(`${moduleDir}/xbs-webui.sh`)} ${args.map(shellQuote).join(' ')}`;
+      }
+
+      async function callHelper(...args) {
+        const result = await root(helperCommand(...args));
+        if (result.startsWith('ERROR:')) throw new Error(result.trim());
+        return result;
+      }
+
+      async function runTask(task) {
+        if (busy) return;
+        setBusy(true);
+        try {
+          await task();
+        } catch (error) {
+          setMessage(error instanceof Error ? error.message : String(error), true);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      async function refreshStatus() {
+        const result = await callHelper('get-status');
+        byId('status-output').textContent = result.trim() || 'No status was returned.';
+        setMessage('Status refreshed.');
+      }
+
+      async function loadConfig() {
+        const result = await callHelper('get-config');
+        byId('config-editor').value = result;
+        setMessage('Configuration loaded.');
+      }
+
+      function utf8ToBase64(value) {
+        if (window.TextEncoder) {
+          const bytes = new TextEncoder().encode(value);
+          let binary = '';
+          for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]);
+          return btoa(binary);
+        }
+        return btoa(unescape(encodeURIComponent(value)));
+      }
+
+      async function saveConfig() {
+        const encoded = utf8ToBase64(byId('config-editor').value);
+        const result = await callHelper('save-config', encoded);
+        setMessage(result.trim() || 'Configuration saved; reload queued.');
+        await refreshStatus();
+      }
+
+      async function queueCommand(action) {
+        if (action === 'safe' && !window.confirm('Enter Safe Mode? This stops active XtremeBS events and unsuspends apps.')) return;
+        const result = await callHelper('command', action);
+        setMessage(result.trim() || `Queued: ${action}`);
+      }
+
+      async function applyCpu0Preset() {
+        const warning = 'This replaces the entire XtremeBS config with an aggressive CPU0-only screen-off profile. It is equivalent to offlining CPU1+ while the screen is off. Continue?';
+        if (!window.confirm(warning)) return;
+        const result = await callHelper('cpu0-preset');
+        setMessage(result.trim());
+        await loadConfig();
+        await refreshStatus();
+      }
+
+      async function refreshLog() {
+        const result = await callHelper('get-log');
+        byId('log-output').textContent = result.trim() || 'No log output was returned.';
+        setMessage('Log refreshed.');
+      }
+
+      async function diagnostics() {
+        const result = await callHelper('diagnostics');
+        byId('diagnostic-output').textContent = result.trim() || 'No diagnostics were returned.';
+        setMessage('Diagnostics refreshed.');
+      }
+
+      async function copyLog() {
+        const text = byId('log-output').textContent;
+        if (!text || text.startsWith('Tap Refresh')) {
+          setMessage('Load the log before copying it.', true);
+          return;
+        }
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(byId('log-output'));
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.execCommand('copy');
+            selection.removeAllRanges();
+          }
+          setMessage('Log copied to the clipboard.');
+        } catch (_) {
+          setMessage('Could not copy automatically; select the log manually.', true);
+        }
+      }
+
+      function switchTab(id) {
+        document.querySelectorAll('.tab').forEach((tab) => {
+          const selected = tab.id === `tab-${id}`;
+          tab.setAttribute('aria-selected', String(selected));
+        });
+        document.querySelectorAll('.panel').forEach((panel) => {
+          panel.classList.toggle('active', panel.id === id);
+        });
+      }
+
+      document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => switchTab(tab.id.replace('tab-', ''))));
+      document.querySelectorAll('[data-command]').forEach((button) => button.addEventListener('click', () => runTask(() => queueCommand(button.dataset.command))));
+      document.querySelector('[data-action="refresh-status"]').addEventListener('click', () => runTask(refreshStatus));
+      document.querySelector('[data-action="diagnostics"]').addEventListener('click', () => runTask(diagnostics));
+      byId('cpu0-preset').addEventListener('click', () => runTask(applyCpu0Preset));
+      byId('save-config').addEventListener('click', () => runTask(saveConfig));
+      byId('reload-config').addEventListener('click', () => runTask(() => queueCommand('reload')));
+      byId('load-config').addEventListener('click', () => runTask(loadConfig));
+      byId('refresh-log').addEventListener('click', () => runTask(refreshLog));
+      byId('copy-log').addEventListener('click', () => runTask(copyLog));
+
+      discoverModuleDir();
+      if (!bridge()) {
+        byId('bridge-error').style.display = 'block';
+        byId('status-output').textContent = 'Open this page from a compatible manager WebUI button.';
+        return;
+      }
+      runTask(async () => {
+        await loadConfig();
+        await refreshStatus();
+      });
+    })();
+  </script>
+</body>
+</html>
