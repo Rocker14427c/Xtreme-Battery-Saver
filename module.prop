@@ -4,4 +4,4 @@ version=v2.1.5-rs1
 versionCode=215
 author=DethByte64, Rocker14427c
 description=Event-driven battery saver with a native KernelSU/ReSukiSU WebUI, direct module-path startup, and safer CPU screen-off controls.
-updateJson=https://github.com/Rocker14427c/Xtreme-Battery-Saver/releases/latest/download/update.json
+updateJson=https://raw.githubusercontent.com/Rocker14427c/Xtreme-Battery-Saver/main/update.json
