@@ -171,7 +171,7 @@ su -c 'cat /data/local/tmp/XtremeBS/XtremeBS.service.log'
 - KernelSU/ReSukiSU does not need a metamodule for this fork's daemon to run: it invokes the bundled files directly from `/data/adb/modules/XtremeBS/`. A metamodule is only relevant if you want the legacy `/system/bin/XBSctl` mount path.
 - CPU names, hotplug permissions, available governors, and `dumpsys` output vary by kernel and ROM. Use Dashboard diagnostics before trusting a profile.
 - Xiaomi/MIUI and other OEM Battery Saver implementations may not update AOSP `settings global low_power`; use `screen_off`, `manual`, or an automation-triggered custom event in that case.
-- New WebUI code was checked with a simulated Android command/CPU-node fixture. It still needs real-device testing on your ROM before enabling destructive options.
+- The native WebUI flow was exercised with a mock ReSukiSU `window.ksu.exec()` bridge and the daemon with a simulated Android command/CPU-node fixture. It still needs real-device testing on your ROM before enabling destructive options.
 
 See [AUDIT.md](AUDIT.md) for the focused source audit, fixes, and known remaining limits.
 

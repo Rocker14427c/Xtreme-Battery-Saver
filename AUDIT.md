@@ -35,7 +35,8 @@ This was a source audit and a Linux fixture test, **not** a substitute for testi
 
 1. `bash -n` checked the Bash daemon; `sh -n` checked all POSIX scripts and CGI handlers. A fake bundled Bash/daemon fixture also verified that `service.sh` resolves and launches direct module paths rather than `/system/bin`.
 2. JavaScript extracted from the native and legacy HTML pages passed `node --check`.
-3. A mocked Android fixture supplied `dumpsys`, `settings`, CPU `online` nodes, and CPU frequency/governor nodes. It verified:
+3. The native page was loaded in a JSDOM WebView-like harness with ReSukiSU's synchronous `window.ksu.exec()` return contract. It exercised initial config/status load, dynamic module-directory discovery, UTF-8/base64 save, destructive-preset confirmation, manual commands, diagnostics, and log rendering.
+4. A mocked Android fixture supplied `dumpsys`, `settings`, CPU `online` nodes, and CPU frequency/governor nodes. It verified:
    - an indented/whitespace-tolerant `screen_off` block changes its online CPUs offline → online, preserves a CPU that was already offline, and restores a temporary `powersave` governor;
    - a still-active `low_power` event immediately re-offlines overlapping CPUs after `screen_off` exits;
    - legacy v1 auto mode offlines and restores its configured core as Android Battery Saver changes; v1-to-v2 migration preserves `ctl_file` and produces a `manual={}` block;
